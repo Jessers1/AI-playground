@@ -22,7 +22,32 @@ flowchart LR
     D --> F[ranked points + heatmap]
 ```
 
-## What's here
+## Web app (`web/`)
+
+A single-page version that runs entirely in the browser, with its own JavaScript engine (`web/engine.js`).
+It fixes the gaps in the Python CLI below:
+
+| Gap in the CLI | What the web engine does |
+|---|---|
+| You pick the band by eye | Searches every band automatically (log-spaced Viterbi ridges), then re-collects points along each fitted curve over the whole clip. A drag-box on the spectrogram adds a missed flyover by hand. |
+| Narrow detection margin | Matched-curve score, checked against the same search run on the time-reversed spectrogram. A real flyover only ever falls in pitch, so that run measures what noise alone can produce. |
+| One pass, no timestamp, gives a line | All selected flyovers are solved together on one shared clock, so two passes pin a point without a timestamp. |
+| Ambiguity hidden in a ranking | A 95% confidence region is computed on a refined sub-grid and split into separate areas (mirror solutions, valleys). The verdict says which case you are in. |
+| Crossing harmonics break the tracker | Fragments are merged. Ridges are attributed to a parent pass by harmonic ratio, and ridges stitched across crossings are dropped. |
+| Optimistic error bars | Errors are inflated by the residuals' full autocorrelation. Each pass counts as at most ~10 independent measurements when sizing the region. |
+| Still air at 343 m/s | Speed of sound comes from air temperature, and wind enters the Doppler and travel-time model. |
+| CSV only | Reads OpenSky/FR24/generic CSV, readsb/tar1090 trace JSON (adsb.lol, ADS-B Exchange), OpenSky track JSON, KML and .gz. Sparse tracks are interpolated with reported speed and heading. |
+
+```bash
+cd web
+node test_engine.js 7     # headless end-to-end test of the engine (two flyovers, unknown time, noise-only clip)
+node build.js             # inlines engine.js into app.html -> dist/flyover-locator.html
+```
+
+The page cannot download flight data itself, because the artifact sandbox blocks network requests. It links
+to replay maps for the area and time instead. It is still only tested on synthetic recordings.
+
+## What's here (Python CLI)
 
 | Script | Job |
 |---|---|

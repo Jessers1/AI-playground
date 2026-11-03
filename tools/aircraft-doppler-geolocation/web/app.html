@@ -1,0 +1,1159 @@
+<title>Flyover Locator</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* Layout: aeronautical-chart paper. A narrow column of numbered "flight strips" (inputs) beside a
+   wide work area: the spectrogram scope on top, the misfit chart and the answer below. */
+:root {
+  --paper: #edf2f5; --panel: #f8fafb; --ink: #13212c; --muted: #566876; --rule: #c8d4dc;
+  --accent: #a8206f; --accent-ink: #ffffff; --blue: #1d5f8a; --blue-soft: #d8e6ef;
+  --good: #24704a; --warn: #9a5b00; --bad: #ae2a1f;
+  --heat-best: #1d5f8a; --heat-mid: #8db1c9; --heat-worst: #e4ecf1; --heat-void: #f3f6f8;
+  --region: #a8206f; --track: #566876;
+  --scope-bg: #08121a; --scope-ink: #b9cad6; --scope-rule: #22394a;
+  --ev1: #ff4fb0; --ev2: #43c7f5; --ev3: #ffc24a; --ev4: #7fe08a; --ev5: #c3a2ff;
+  --map-ev1: #b3166f; --map-ev2: #0a7ab8; --map-ev3: #a86400; --map-ev4: #23824a; --map-ev5: #6b49c2;
+  --f-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r: 6px;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --paper: #0c151c; --panel: #111d26; --ink: #e2eaf0; --muted: #93a6b4; --rule: #243541;
+  --accent: #ff5cb4; --accent-ink: #1a0711; --blue: #6cc3f0; --blue-soft: #17303f;
+  --good: #63c98f; --warn: #e5a64a; --bad: #f2776c;
+  --heat-best: #6cc3f0; --heat-mid: #285a76; --heat-worst: #0f1b24; --heat-void: #0d161d;
+  --region: #ff5cb4; --track: #93a6b4;
+  --map-ev1: #ff5cb4; --map-ev2: #5cc8f5; --map-ev3: #ffc24a; --map-ev4: #7fe08a; --map-ev5: #c3a2ff;
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --paper: #0c151c; --panel: #111d26; --ink: #e2eaf0; --muted: #93a6b4; --rule: #243541;
+  --accent: #ff5cb4; --accent-ink: #1a0711; --blue: #6cc3f0; --blue-soft: #17303f;
+  --good: #63c98f; --warn: #e5a64a; --bad: #f2776c;
+  --heat-best: #6cc3f0; --heat-mid: #285a76; --heat-worst: #0f1b24; --heat-void: #0d161d;
+  --region: #ff5cb4; --track: #93a6b4;
+  --map-ev1: #ff5cb4; --map-ev2: #5cc8f5; --map-ev3: #ffc24a; --map-ev4: #7fe08a; --map-ev5: #c3a2ff;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--paper); color: var(--ink); font: 15px/1.5 var(--f-body); }
+.page { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 20px 40px; max-width: 1440px; margin: 0 auto; display: grid; gap: 20px; }
+h1, h2, h3 { font-family: var(--f-display); font-weight: 700; letter-spacing: 0.01em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(30px, 4.2vw, 44px); line-height: 1; text-transform: uppercase; }
+h2 { font-size: 20px; text-transform: uppercase; letter-spacing: 0.04em; }
+h3 { font-size: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
+p { margin: 0; }
+a { color: var(--blue); }
+.mono, .num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px 24px; border-bottom: 2px solid var(--ink); padding-bottom: 14px; }
+header.top .lede { max-width: 62ch; color: var(--muted); margin-top: 6px; }
+.squawk { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tag { font: 500 12px/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 4px; color: var(--muted); background: var(--panel); }
+.tag.demo { border-color: var(--accent); color: var(--accent); }
+
+.layout { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+/* flight strips */
+.strips { display: grid; gap: 14px; }
+.strip { background: var(--panel); border: 1px solid var(--rule); border-left: 0; border-radius: 0 var(--r) var(--r) 0; display: grid; grid-template-columns: 34px minmax(0, 1fr); }
+.strip > .bay { background: var(--ink); color: var(--paper); font: 700 18px/1 var(--f-display); display: flex; align-items: flex-start; justify-content: center; padding-top: 14px; }
+.strip > .body { padding: 12px 14px 14px; display: grid; gap: 10px; min-width: 0; }
+.strip .hint { font-size: 13px; color: var(--muted); }
+.field { display: grid; gap: 4px; min-width: 0; }
+.field label, .lbl { font: 500 11px/1.2 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+input[type="number"], input[type="text"], input[type="date"], input[type="time"], select {
+  width: 100%; min-width: 0; font: 14px/1.3 var(--f-mono); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 4px; padding: 7px 8px;
+}
+input:focus-visible, select:focus-visible, button:focus-visible, .filebtn:focus-within, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+button, .filebtn { font: 600 14px/1 var(--f-body); border-radius: 4px; padding: 9px 12px; border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+button:hover, .filebtn:hover { background: var(--blue-soft); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-size: 15px; padding: 11px 16px; }
+button.primary:hover { filter: brightness(1.08); background: var(--accent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.link { border: 0; padding: 0; color: var(--blue); background: none; text-decoration: underline; font-weight: 500; }
+.filebtn input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.filebtn { position: relative; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.fileinfo { font: 13px/1.4 var(--f-mono); color: var(--muted); word-break: break-word; }
+.notes { display: grid; gap: 4px; font-size: 13px; color: var(--muted); margin: 0; padding-left: 18px; }
+.aclist { display: grid; gap: 2px; max-height: 170px; overflow: auto; border-top: 1px solid var(--rule); padding-top: 6px; }
+.ac { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; font: 13px/1.5 var(--f-mono); }
+.ac .k { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details { font-size: 13px; }
+details summary { cursor: pointer; color: var(--blue); font-weight: 500; }
+details .inner { display: grid; gap: 6px; margin-top: 8px; color: var(--muted); }
+.progress { display: grid; gap: 6px; }
+.bar { height: 6px; background: var(--rule); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.15s; }
+.status { font-size: 13px; color: var(--muted); min-height: 1.4em; }
+.status.err { color: var(--bad); }
+
+/* work area */
+.work { display: grid; gap: 20px; min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r); min-width: 0; }
+.panel > .head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; padding: 12px 16px; border-bottom: 1px solid var(--rule); }
+.panel > .content { padding: 14px 16px 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
+.scope { background: var(--scope-bg); border-radius: 4px; position: relative; overflow: hidden; }
+.scope canvas { display: block; width: 100%; height: 300px; touch-action: pan-y; }
+.scope.marking canvas { cursor: crosshair; touch-action: none; }
+.scope .overlay-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--scope-ink); font: 14px var(--f-mono); text-align: center; padding: 16px; }
+.passes { display: grid; gap: 8px; }
+.pass { display: grid; grid-template-columns: auto 10px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--rule); border-radius: 4px; }
+.pass .sw { width: 10px; height: 28px; border-radius: 2px; }
+.pass .t { font-weight: 600; }
+.pass .meta { font: 13px/1.45 var(--f-mono); color: var(--muted); }
+.pass .meta b { color: var(--ink); font-weight: 500; }
+.pass.off { opacity: 0.55; }
+.pass .warn { color: var(--warn); font-size: 12px; }
+.pill { font: 600 12px/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.05em; padding: 5px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.pill.good { color: var(--good); } .pill.warn { color: var(--warn); } .pill.bad { color: var(--bad); } .pill.info { color: var(--muted); }
+
+.results { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1180px) { .results { grid-template-columns: minmax(0, 1fr); } }
+.mapwrap { position: relative; }
+.mapwrap canvas { display: block; width: 100%; aspect-ratio: 1 / 1; max-width: 100%; border-radius: 4px; touch-action: manipulation; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--paper); font: 12px/1.4 var(--f-mono); padding: 6px 8px; border-radius: 4px; white-space: nowrap; transform: translate(-50%, calc(-100% - 10px)); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--muted); align-items: center; }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -2px; margin-right: 5px; }
+.legend .grad { width: 64px; background: linear-gradient(90deg, var(--heat-best), var(--heat-mid), var(--heat-worst)); }
+.answer { display: grid; gap: 12px; }
+.coords { font: 500 clamp(20px, 2.6vw, 26px)/1.2 var(--f-mono); letter-spacing: -0.01em; word-break: break-word; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; font-size: 14px; }
+.kv dt { font: 500 11px/1.9 var(--f-mono); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.kv dd { margin: 0; min-width: 0; }
+.explain { font-size: 14px; color: var(--muted); max-width: 62ch; }
+.tablewrap { overflow-x: auto; min-width: 0; max-width: 100%; }
+.speclegend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--muted); }
+.speclegend b { font-weight: 600; color: var(--ink); }
+table { border-collapse: collapse; width: 100%; font: 13px/1.4 var(--f-mono); font-variant-numeric: tabular-nums; }
+th { text-align: left; font: 500 11px/1.2 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--rule); padding: 6px 8px; white-space: nowrap; }
+td { padding: 6px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+tr.sel td { background: var(--blue-soft); }
+tbody tr { cursor: pointer; }
+
+.about { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 20px; border-top: 2px solid var(--ink); padding-top: 18px; }
+.about section { display: grid; gap: 8px; align-content: start; font-size: 14px; color: var(--muted); }
+.about h3 { color: var(--ink); }
+.about ol, .about ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+@media (prefers-reduced-motion: reduce) { .bar > i { transition: none; } }
+</style>
+
+<div class="page">
+  <header class="top">
+    <div>
+      <h1>Flyover Locator</h1>
+      <p class="lede">Works out where a recording was made from the falling hum of passing aircraft. Each flyover's Doppler curve is matched against public ADS-B flight tracks. Everything runs in this browser tab, and your files are never uploaded.</p>
+    </div>
+    <div class="squawk">
+      <span class="tag demo" id="demoTag">Synthetic demo loaded</span>
+      <button id="btnDemo" type="button">Reload demo</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="strips" aria-label="Inputs">
+      <div class="strip">
+        <div class="bay" aria-hidden="true">1</div>
+        <div class="body">
+          <h2>Recording</h2>
+          <p class="hint">Audio or video with a plane audible for 10 s or more. A steady background is fine. Up to 15 minutes is analysed.</p>
+          <div class="btnrow">
+            <label class="filebtn">Open recording<input id="fileAudio" type="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.mp4,.mov,.aac,.ogg,.flac,.webm"></label>
+          </div>
+          <div class="fileinfo" id="audioInfo">demo-flyovers.wav · 2:00 · two aircraft</div>
+          <div class="progress" id="audioProg" hidden><div class="bar"><i></i></div><div class="status"></div></div>
+        </div>
+      </div>
+
+      <div class="strip">
+        <div class="bay" aria-hidden="true">2</div>
+        <div class="body">
+          <h2>Flight data</h2>
+          <p class="hint">ADS-B tracks covering the time and place: CSV (OpenSky, FlightRadar24, generic), readsb/tar1090 trace JSON, OpenSky track JSON or KML. A .gz file is fine. You can add several files.</p>
+          <div class="btnrow">
+            <label class="filebtn">Add flight files<input id="fileFlights" type="file" multiple accept=".csv,.json,.kml,.gz,.txt,.tsv"></label>
+            <button type="button" id="btnClearFlights">Clear</button>
+          </div>
+          <div class="row2">
+            <div class="field"><label for="altUnits">Altitude units</label>
+              <select id="altUnits"><option value="auto">Detect</option><option value="ft">Feet</option><option value="m">Metres</option></select></div>
+            <div class="field"><label>Aircraft</label><div class="mono" id="acCount">0</div></div>
+          </div>
+          <div class="aclist" id="acList"></div>
+          <ul class="notes" id="flightNotes"></ul>
+          <details>
+            <summary>Where to get flight data</summary>
+            <div class="inner" id="findData"></div>
+          </details>
+        </div>
+      </div>
+
+      <div class="strip">
+        <div class="bay" aria-hidden="true">3</div>
+        <div class="body">
+          <h2>Search</h2>
+          <div class="row2">
+            <div class="field"><label for="lat">Centre latitude</label><input id="lat" type="number" step="0.0001"></div>
+            <div class="field"><label for="lon">Centre longitude</label><input id="lon" type="number" step="0.0001"></div>
+          </div>
+          <div class="btnrow"><button type="button" class="link" id="btnCenter">Centre on the flight data</button></div>
+          <div class="row2">
+            <div class="field"><label for="radius">Half-width (km)</label><input id="radius" type="number" min="0.5" max="30" step="0.5" value="4"></div>
+            <div class="field"><label for="step">Grid spacing (m)</label><input id="step" type="number" min="25" max="2000" step="25" value="200"></div>
+          </div>
+          <div class="row2">
+            <div class="field"><label for="elev">Ground elevation (m)</label><input id="elev" type="number" step="1" value="300"></div>
+            <div class="field"><label for="micH">Mic height (m)</label><input id="micH" type="number" step="0.5" value="1.5"></div>
+          </div>
+          <div class="row3">
+            <div class="field"><label for="temp">Air temp (°C)</label><input id="temp" type="number" step="1" value="15"></div>
+            <div class="field"><label for="wind">Wind (m/s)</label><input id="wind" type="number" min="0" step="1" value="0"></div>
+            <div class="field"><label for="windDir">From (°)</label><input id="windDir" type="number" min="0" max="360" step="5" value="270"></div>
+          </div>
+          <label class="check"><input type="checkbox" id="timeKnown"> I know when the recording started</label>
+          <div id="timeFields" hidden>
+            <div class="row3">
+              <div class="field"><label for="recDate">Date (UTC)</label><input id="recDate" type="date"></div>
+              <div class="field"><label for="recTime">Time (UTC)</label><input id="recTime" type="time" step="1"></div>
+              <div class="field"><label for="recTol">± seconds</label><input id="recTol" type="number" min="0.5" max="120" step="0.5" value="2"></div>
+            </div>
+          </div>
+          <div class="hint" id="metaHint" hidden></div>
+          <button type="button" class="primary" id="btnLocate">Locate</button>
+          <div class="progress" id="locProg" hidden><div class="bar"><i></i></div><div class="status"></div></div>
+          <div class="status" id="locStatus"></div>
+        </div>
+      </div>
+    </aside>
+
+    <div class="work">
+      <section class="panel" aria-labelledby="hScope">
+        <div class="head">
+          <h2 id="hScope">Flyovers heard</h2>
+          <div class="btnrow">
+            <span class="small muted" id="nullInfo"></span>
+            <button type="button" id="btnMark" aria-pressed="false">Mark a flyover by hand</button>
+          </div>
+        </div>
+        <div class="content">
+          <div class="scope" id="scope">
+            <canvas id="spec" aria-label="Spectrogram with detected flyovers"></canvas>
+            <div class="overlay-msg" id="scopeMsg">Building the demo recording…</div>
+          </div>
+          <div class="speclegend"><span><b>· ·</b> traced points</span><span><b>—</b> fitted Doppler curve</span><span><b>- -</b> curve predicted at the selected map point</span><span>grey dots: tones below the noise bar</span></div>
+          <p class="small muted" id="markHint" hidden>Drag a box around one falling line on the spectrogram. Include at least 4 s of it.</p>
+          <div class="passes" id="passes"></div>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="hRes">
+        <div class="head">
+          <h2 id="hRes">Where it was recorded</h2>
+          <span id="verdict"></span>
+        </div>
+        <div class="content">
+          <div class="results">
+            <div class="mapwrap">
+              <canvas id="map" aria-label="Map of misfit across the search area"></canvas>
+              <div class="tip" id="tip" hidden></div>
+            </div>
+            <div class="answer" id="answer">
+              <p class="muted">The answer appears here after Locate.</p>
+            </div>
+          </div>
+          <div class="legend">
+            <span><i class="grad"></i>misfit: good → poor</span>
+            <span><i style="background: var(--region)"></i>95% confidence region</span>
+            <span><i style="background: var(--track); height: 2px"></i>ADS-B track</span>
+            <span>★ best point · tap the map to compare a point's predicted curves</span>
+          </div>
+          <div class="tablewrap" id="areas"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer class="about">
+    <section>
+      <h3>How it works</h3>
+      <ol>
+        <li>A narrow-band spectrogram is searched for falling tones. Each tone is fitted with a straight-pass Doppler model for base tone, speed, closest distance and closest-approach time.</li>
+        <li>Each tone is scored against the same search run on the time-reversed recording. A real flyover only falls in pitch, so that run measures what noise alone can produce.</li>
+        <li>For every grid point and every start time, the exact curve that point would have heard is predicted from each ADS-B track, including wind and temperature. All flyovers share one clock.</li>
+      </ol>
+    </section>
+    <section>
+      <h3>Read the answer carefully</h3>
+      <ul>
+        <li>One straight pass with no timestamp fixes only your distance from the flight line. Add the time or a second flyover.</li>
+        <li>Even with the time, a straight level pass cannot tell which side of the track you were on, so expect two areas.</li>
+        <li>The 95% region assumes the flight data is right. Barometric altitude, coarse tracks and gusty wind make the real uncertainty larger.</li>
+        <li>So far this has only been checked on synthetic recordings, not on a real recording with known ground truth.</li>
+      </ul>
+    </section>
+    <section>
+      <h3>Privacy</h3>
+      <ul>
+        <li>This locates people. Only analyse recordings you have the right to analyse.</li>
+        <li>To protect your own clips: strip the creation time and location metadata, and cut out stretches where a plane is audible. Strong noise suppression also helps. A simple high-pass filter usually does not.</li>
+      </ul>
+    </section>
+  </footer>
+</div>
+
+<script id="engine-src">/*__ENGINE__*/</script>
+<script>
+(function () {
+'use strict';
+const E = window.DopplerEngine;
+const $ = (id) => document.getElementById(id);
+const SR_ANALYSIS = 2000;
+
+// ------------------------------------------------------------------ workers
+function makeHandler(E, post) {
+  let S = null;
+  return function (m) {
+    try {
+      if (m.type === 'analyze') {
+        let x = m.samples, sr = m.sr;
+        if (sr !== 2000) { post({ type: 'progress', id: m.id, stage: 'Resampling', p: 0 }); x = E.resample(x, sr, 2000); sr = 2000; }
+        const spec = E.spectrogram(x, sr, { onProgress: (p) => post({ type: 'progress', id: m.id, stage: 'Building the spectrogram', p: 0.1 * p }) });
+        const z = E.whiten(spec);
+        const det = E.detectFlyovers(spec, z, { c: m.c }, (p) => post({ type: 'progress', id: m.id, stage: 'Searching for flyovers', p: 0.1 + 0.9 * p }));
+        S = { spec, z };
+        const meta = { nT: spec.nT, nF: spec.nF, times: spec.times, freqs: spec.freqs, df: spec.df, hop: spec.hop, win: spec.win, duration: spec.duration };
+        post({ type: 'analyzed', id: m.id, spec: meta, z: z.slice(), detections: det.detections, nullMax: det.nullMax, threshold: det.threshold, nullCount: det.nullCount });
+      } else if (m.type === 'box') {
+        if (!S) throw new Error('Load a recording first.');
+        post(Object.assign({ type: 'box', id: m.id }, E.detectInBox(S.spec, S.z, m.box, { c: m.c })));
+      } else if (m.type === 'score') {
+        const res = E.scoreCandidates(m.job, (p) => post({ type: 'progress', id: m.id, p }));
+        post({ type: 'scored', id: m.id, res });
+      }
+    } catch (err) {
+      post({ type: 'error', id: m.id, message: (err && err.message) || String(err) });
+    }
+  };
+}
+
+class Pool {
+  constructor(n) {
+    this.next = 1; this.waiting = new Map(); this.workers = [];
+    const src = document.getElementById('engine-src').textContent + '\n;(' + function (mk) {
+      const h = mk(self.DopplerEngine, (msg) => self.postMessage(msg));
+      self.onmessage = (e) => h(e.data);
+    }.toString() + ')(' + makeHandler.toString() + ');';
+    let url = null;
+    try { url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' })); } catch (e) { url = null; }
+    for (let i = 0; i < n; i++) {
+      let w = null;
+      try { if (url) w = new Worker(url); } catch (e) { w = null; }
+      if (!w) { // run on the page itself if workers are not allowed here
+        const self_ = { onmessage: null };
+        const h = makeHandler(E, (msg) => setTimeout(() => self_.onmessage && self_.onmessage({ data: msg }), 0));
+        w = { postMessage: (m) => setTimeout(() => h(m), 0), set onmessage(f) { self_.onmessage = f; } };
+      }
+      w.onmessage = (e) => this.receive(e.data);
+      this.workers.push(w);
+    }
+  }
+  receive(m) {
+    const job = this.waiting.get(m.id);
+    if (!job) return;
+    if (m.type === 'progress') { job.onProgress && job.onProgress(m); return; }
+    this.waiting.delete(m.id);
+    if (m.type === 'error') job.reject(new Error(m.message)); else job.resolve(m);
+  }
+  call(i, msg, onProgress) {
+    const id = this.next++;
+    return new Promise((resolve, reject) => {
+      this.waiting.set(id, { resolve, reject, onProgress });
+      this.workers[i].postMessage(Object.assign({ id }, msg));
+    });
+  }
+}
+const nWorkers = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 0));
+const pool = new Pool(nWorkers);
+
+// ------------------------------------------------------------------ state
+const st = {
+  demo: null, audioName: '', spec: null, z: null, dets: [], manual: [], passes: [], include: [],
+  nullMax: 0, threshold: 0, flights: [], results: null, selected: null, specImg: null, meta: null,
+};
+
+// ------------------------------------------------------------------ helpers
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmtClock = (t) => { const s = Math.round(Math.max(0, t)); const m = Math.floor(s / 60); return `${m}:${String(s - 60 * m).padStart(2, '0')}`; };
+const fmtDist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 2)} km` : `${Math.round(m)} m`);
+const fmtUTC = (u) => { if (!Number.isFinite(u)) return '–'; const d = new Date(u * 1000); return d.toISOString().replace('T', ' ').replace(/\.(\d)\d\dZ$/, '.$1Z'); };
+const setProg = (el, p, text) => { el.hidden = false; el.querySelector('i').style.width = `${Math.round(100 * Math.max(0, Math.min(1, p)))}%`; el.querySelector('.status').textContent = text; };
+const passColor = (i, map) => css(`--${map ? 'map-' : ''}ev${(i % 5) + 1}`);
+function hexToRgb(h) { h = h.replace('#', ''); if (h.length === 3) h = h.split('').map((c) => c + c).join(''); const n = parseInt(h, 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+function mix(a, b, t) { return [0, 1, 2].map((k) => Math.round(a[k] + (b[k] - a[k]) * t)); }
+function setStatus(id, text, err) { const el = $(id); el.textContent = text || ''; el.classList.toggle('err', !!err); }
+
+// ------------------------------------------------------------------ recording
+function mp4CreationTime(u8) {
+  for (let i = 4; i < u8.length - 24; i++) {
+    if (u8[i] === 0x6d && u8[i + 1] === 0x76 && u8[i + 2] === 0x68 && u8[i + 3] === 0x64) {
+      const dv = new DataView(u8.buffer, u8.byteOffset + i + 8, 8);
+      const t = u8[i + 4] === 1 ? Number(dv.getBigUint64(0)) : dv.getUint32(0);
+      const unix = t - 2082844800;
+      return unix > 1104537600 && unix < Date.now() / 1000 + 86400 ? unix : null;
+    }
+  }
+  return null;
+}
+
+async function decodeRecording(file) {
+  const buf = await file.arrayBuffer();
+  const created = mp4CreationTime(new Uint8Array(buf));
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error('This browser cannot decode audio.');
+  const ac = new AC();
+  let audio;
+  try { audio = await ac.decodeAudioData(buf.slice(0)); }
+  catch (e) { throw new Error(`"${file.name}" could not be decoded. Try WAV, MP3, M4A or MP4.`); }
+  finally { try { ac.close(); } catch (e) { /* ignore */ } }
+  const len = Math.min(audio.duration, 900);
+  let samples, sr;
+  try {
+    const off = new OfflineAudioContext(1, Math.ceil(len * 8000), 8000);
+    const src = off.createBufferSource();
+    src.buffer = audio; src.connect(off.destination); src.start(0);
+    samples = (await off.startRendering()).getChannelData(0); sr = 8000;
+  } catch (e) {
+    sr = audio.sampleRate;
+    const n = Math.floor(len * sr);
+    samples = new Float32Array(n);
+    for (let ch = 0; ch < audio.numberOfChannels; ch++) { const d = audio.getChannelData(ch); for (let i = 0; i < n; i++) samples[i] += d[i] / audio.numberOfChannels; }
+  }
+  return { samples, sr, duration: audio.duration, truncated: audio.duration > 900, created };
+}
+
+async function analyse(samples, sr, label) {
+  const prog = $('audioProg');
+  setProg(prog, 0, 'Starting…');
+  $('scopeMsg').hidden = false; $('scopeMsg').textContent = 'Analysing…';
+  const c = E.soundSpeed(num('temp', 15));
+  const res = await pool.call(0, { type: 'analyze', samples, sr, c }, (m) => setProg(prog, m.p, `${m.stage}…`));
+  prog.hidden = true;
+  st.audioName = label;
+  st.meta = res.spec; st.z = res.z; st.dets = res.detections; st.nullMax = res.nullMax; st.threshold = res.threshold;
+  st.manual = []; st.results = null; st.selected = null;
+  rebuildPasses(true);
+  buildSpecImage();
+  $('scopeMsg').hidden = true;
+  drawSpec();
+  renderPasses();
+  renderNull(res);
+}
+
+function renderNull(res) {
+  const acc = st.dets.filter((d) => d.accepted).length;
+  const noise = res.nullMax < 0.5 ? 'the time-reversed check found nothing' : `noise alone reached ${res.nullMax.toFixed(1)}`;
+  $('nullInfo').textContent = `${acc} tone${acc === 1 ? '' : 's'} above the noise bar of ${res.threshold.toFixed(0)} (${noise})`;
+}
+
+function rebuildPasses(resetInclude) {
+  const ridges = st.dets.filter((d) => d.accepted).concat(st.manual);
+  const prev = st.passes.map((p, i) => [p.tcaRecv, st.include[i]]);
+  st.passes = E.groupPasses(ridges);
+  st.include = st.passes.map((p) => {
+    if (resetInclude) return true;
+    const m = prev.find(([t]) => Math.abs(t - p.tcaRecv) < 1);
+    return m ? m[1] : true;
+  });
+}
+
+// ------------------------------------------------------------------ spectrogram view
+const F_LO = 20, F_HI = 900;
+function buildSpecImage() {
+  const { nT, nF, freqs, df } = st.meta, z = st.z;
+  const W = Math.min(nT, 2400), H = 340;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(W, H);
+  const stops = [[0, [7, 16, 25]], [0.35, [18, 53, 77]], [0.6, [31, 122, 140]], [0.82, [230, 162, 60]], [1, [255, 244, 214]]];
+  const lut = [];
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255; let k = 0;
+    while (k < stops.length - 2 && v > stops[k + 1][0]) k++;
+    const [a, ca] = stops[k], [b, cb] = stops[k + 1];
+    lut.push(mix(ca, cb, (v - a) / (b - a)));
+  }
+  const l0 = Math.log(F_LO), l1 = Math.log(F_HI);
+  const rowBins = [];
+  for (let y = 0; y < H; y++) {
+    const fa = Math.exp(l0 + (l1 - l0) * (H - 1 - y - 0.5) / H), fb = Math.exp(l0 + (l1 - l0) * (H - 1 - y + 0.5) / H);
+    const ba = Math.max(0, Math.floor((fa - freqs[0]) / df)), bb = Math.min(nF - 1, Math.ceil((fb - freqs[0]) / df));
+    rowBins.push([ba, Math.max(ba, bb)]);
+  }
+  for (let x = 0; x < W; x++) {
+    const t0 = Math.floor(x * nT / W), t1 = Math.max(t0 + 1, Math.floor((x + 1) * nT / W));
+    for (let y = 0; y < H; y++) {
+      const [ba, bb] = rowBins[y];
+      let m = -9;
+      if (bb >= 0 && ba < nF) for (let t = t0; t < t1; t++) for (let b = ba; b <= bb; b++) { const v = z[t * nF + b]; if (v > m) m = v; }
+      const q = Math.max(0, Math.min(255, Math.round((m + 1) / 7 * 255)));
+      const o = 4 * (y * W + x), c = lut[q];
+      img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  st.specImg = cv;
+}
+
+const specGeom = { padL: 46, padR: 10, padT: 10, padB: 26 };
+function specXY(cv, t, f) {
+  const { padL, padR, padT, padB } = specGeom, W = cv.clientWidth, H = cv.clientHeight;
+  const x = padL + (t / st.meta.duration) * (W - padL - padR);
+  const y = padT + (1 - (Math.log(f) - Math.log(F_LO)) / (Math.log(F_HI) - Math.log(F_LO))) * (H - padT - padB);
+  return [x, y];
+}
+function specInv(cv, x, y) {
+  const { padL, padR, padT, padB } = specGeom, W = cv.clientWidth, H = cv.clientHeight;
+  const t = (x - padL) / (W - padL - padR) * st.meta.duration;
+  const f = Math.exp(Math.log(F_LO) + (1 - (y - padT) / (H - padT - padB)) * (Math.log(F_HI) - Math.log(F_LO)));
+  return [t, f];
+}
+
+let dragBox = null;
+function drawSpec() {
+  const cv = $('spec'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css('--scope-bg'); ctx.fillRect(0, 0, W, H);
+  if (!st.meta || !st.specImg) return;
+  const { padL, padR, padT, padB } = specGeom;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(st.specImg, padL, padT, W - padL - padR, H - padT - padB);
+  // axes
+  ctx.fillStyle = css('--scope-ink'); ctx.strokeStyle = css('--scope-rule'); ctx.font = '11px ' + css('--f-mono'); ctx.lineWidth = 1;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (const f of [25, 50, 100, 200, 400, 800]) { const [, y] = specXY(cv, 0, f); ctx.fillText(String(f), padL - 6, y); ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke(); ctx.globalAlpha = 1; }
+  ctx.save(); ctx.translate(11, padT + (H - padT - padB) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText('Hz', 0, 0); ctx.restore();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const dur = st.meta.duration, pxPerS = (W - padL - padR) / dur;
+  const stepT = [5, 10, 15, 30, 60, 120, 300].find((s_) => s_ * pxPerS >= 56) || 600;
+  for (let t = 0; t <= dur; t += stepT) { const [x] = specXY(cv, t, 100); ctx.fillText(fmtClock(t), x, H - padB + 6); }
+  // ridges and fitted curves
+  ctx.save(); ctx.beginPath(); ctx.rect(padL, padT, W - padL - padR, H - padT - padB); ctx.clip();
+  for (const d of st.dets.filter((q) => !q.accepted && q.plausible)) drawRidge(ctx, cv, d, 'rgba(185,202,214,0.45)', true);
+  st.passes.forEach((p, i) => {
+    const col = passColor(i, false), on = st.include[i];
+    for (const r of p.ridges) drawRidge(ctx, cv, r, col, false, on ? 1 : 0.35);
+  });
+  // predicted curves at the selected map point
+  if (st.selected && st.selected.curves) {
+    ctx.setLineDash([5, 4]); ctx.lineWidth = 1.6; ctx.strokeStyle = '#ffffff';
+    for (const cu of st.selected.curves) {
+      ctx.beginPath(); let pen = false;
+      cu.t.forEach((t, k) => { const f = cu.f[k]; if (!Number.isFinite(f)) { pen = false; return; } const [x, y] = specXY(cv, t, f); if (pen) ctx.lineTo(x, y); else { ctx.moveTo(x, y); pen = true; } });
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  if (dragBox) {
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+    ctx.strokeRect(Math.min(dragBox.x0, dragBox.x1), Math.min(dragBox.y0, dragBox.y1), Math.abs(dragBox.x1 - dragBox.x0), Math.abs(dragBox.y1 - dragBox.y0));
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function ridgeCurve(d) {
+  const P = d.harmonicOf, q = d.ratio || 1;
+  const g = P || d, c = E.soundSpeed(num('temp', 15));
+  return (t) => q * E.spCurve(t, g.f0, g.v, g.d, g.tca, c);
+}
+function drawRidge(ctx, cv, d, color, faint, alpha = 1) {
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  const step = Math.max(1, Math.floor(d.t.length / 400));
+  for (let k = 0; k < d.t.length; k += step) { const [x, y] = specXY(cv, d.t[k], d.f[k]); ctx.fillRect(x - 1, y - 1, 2, 2); }
+  if (!faint) {
+    const fc = ridgeCurve(d);
+    ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+    const n = 200;
+    for (let k = 0; k <= n; k++) { const t = d.t0 + (d.t1 - d.t0) * k / n, [x, y] = specXY(cv, t, fc(t)); if (k) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function renderPasses() {
+  const box = $('passes');
+  box.innerHTML = '';
+  if (!st.passes.length) {
+    box.innerHTML = '<p class="muted small">No flyover rose above the noise bar. If you can see a falling line, use Mark a flyover by hand.</p>';
+    return;
+  }
+  st.passes.forEach((p, i) => {
+    const el = document.createElement('div');
+    el.className = 'pass' + (st.include[i] ? '' : ' off');
+    const lead = p.ridges.find((r) => !r.harmonicOf) || p.ridges[0];
+    const tones = p.ridges.map((r) => Math.round(r.f0)).sort((a, b) => a - b).join(' / ');
+    const manual = p.ridges.some((r) => r.manual);
+    const warn = lead.warnings && lead.warnings.length ? `<div class="warn">${lead.warnings[0]}</div>` : '';
+    const score = manual ? 'marked by hand' : `score <b>${p.score.toFixed(0)}</b> vs bar ${st.threshold.toFixed(0)}`;
+    el.innerHTML = `<input type="checkbox" id="inc${i}" ${st.include[i] ? 'checked' : ''} aria-label="Use flyover ${i + 1}">
+      <span class="sw" style="background:${passColor(i, false)}"></span>
+      <div><div class="t">Flyover ${i + 1} <span class="muted small">heard ${fmtClock(p.t0)}–${fmtClock(p.t1)}</span></div>
+      <div class="meta">tone <b>${tones} Hz</b> · speed <b>${p.v.toFixed(0)} m/s</b> (${(p.v / 0.514444).toFixed(0)} kt) ±${(lead.se.v || 0).toFixed(1)} · closest <b>${fmtDist(p.d)}</b> ±${fmtDist(lead.se.d || 0)} at <b>${fmtClock(p.tcaRecv)}</b> · ${score}</div>${warn}</div>
+      ${manual ? `<button type="button" data-rm="${i}">Remove</button>` : '<span></span>'}`;
+    box.appendChild(el);
+    el.querySelector('input').addEventListener('change', (e) => { st.include[i] = e.target.checked; el.classList.toggle('off', !e.target.checked); drawSpec(); });
+    const rm = el.querySelector('[data-rm]');
+    if (rm) rm.addEventListener('click', () => { st.manual = st.manual.filter((r) => !p.ridges.includes(r)); rebuildPasses(false); renderPasses(); drawSpec(); });
+  });
+}
+
+// box marking
+let marking = false;
+$('btnMark').addEventListener('click', () => {
+  marking = !marking;
+  $('btnMark').setAttribute('aria-pressed', String(marking));
+  $('btnMark').textContent = marking ? 'Stop marking' : 'Mark a flyover by hand';
+  $('scope').classList.toggle('marking', marking);
+  $('markHint').hidden = !marking;
+});
+const specCv = $('spec');
+specCv.addEventListener('pointerdown', (e) => {
+  if (!marking || !st.meta) return;
+  const r = specCv.getBoundingClientRect();
+  dragBox = { x0: e.clientX - r.left, y0: e.clientY - r.top, x1: e.clientX - r.left, y1: e.clientY - r.top };
+  specCv.setPointerCapture(e.pointerId);
+});
+specCv.addEventListener('pointermove', (e) => {
+  if (!dragBox) return;
+  const r = specCv.getBoundingClientRect();
+  dragBox.x1 = e.clientX - r.left; dragBox.y1 = e.clientY - r.top;
+  drawSpec();
+});
+specCv.addEventListener('pointerup', async () => {
+  if (!dragBox) return;
+  const b = dragBox; dragBox = null; drawSpec();
+  const [ta, fa] = specInv(specCv, Math.min(b.x0, b.x1), Math.max(b.y0, b.y1));
+  const [tb, fb] = specInv(specCv, Math.max(b.x0, b.x1), Math.min(b.y0, b.y1));
+  if (tb - ta < 4) { setStatus('locStatus', 'That box is shorter than 4 s. Drag a longer one.', true); return; }
+  try {
+    const res = await pool.call(0, { type: 'box', box: { t0: ta, t1: tb, f0: fa, f1: fb }, c: E.soundSpeed(num('temp', 15)) });
+    if (res.error) { setStatus('locStatus', res.error, true); return; }
+    const d = res.detection; d.manual = true; d.accepted = true;
+    st.manual.push(d);
+    rebuildPasses(false); renderPasses(); drawSpec();
+    setStatus('locStatus', `Added a flyover at ${Math.round(d.f0)} Hz. Press Locate to use it.`);
+  } catch (err) { setStatus('locStatus', err.message, true); }
+});
+
+// ------------------------------------------------------------------ flight data
+async function readFileText(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (buf[0] === 0x1f && buf[1] === 0x8b) {
+    if (typeof DecompressionStream === 'undefined') throw new Error(`${file.name} is gzipped and this browser cannot unzip it. Unzip it first.`);
+    const ds = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return await new Response(ds).text();
+  }
+  return new TextDecoder().decode(buf);
+}
+function parseAllFlights() {
+  const units = $('altUnits').value;
+  for (const f of st.flights) {
+    try { const r = E.parseFlights(f.name, f.text, units); f.aircraft = r.aircraft; f.notes = r.notes; f.error = null; }
+    catch (e) { f.aircraft = []; f.notes = []; f.error = e.message; }
+  }
+  renderFlights();
+}
+function allAircraft() { return st.flights.flatMap((f) => f.aircraft || []); }
+function renderFlights() {
+  const acs = allAircraft();
+  $('acCount').textContent = String(acs.length);
+  const list = $('acList');
+  list.innerHTML = '';
+  for (const a of acs) {
+    const row = document.createElement('div');
+    row.className = 'ac';
+    const span = a.t[a.t.length - 1] - a.t[0];
+    row.innerHTML = `<span class="k">${escapeHtml(a.label && a.label !== a.id ? `${a.label} · ${a.id}` : a.id)}</span><span>${a.t.length} pts · ${fmtClock(span)}</span>`;
+    row.title = `${fmtUTC(a.t[0])} → ${fmtUTC(a.t[a.t.length - 1])}, ${a.altKind} altitude`;
+    list.appendChild(row);
+  }
+  const notes = $('flightNotes');
+  notes.innerHTML = '';
+  for (const f of st.flights) {
+    const li = document.createElement('li');
+    li.textContent = f.error ? `${f.name}: ${f.error}` : `${f.name}: ${f.notes.join(' ')}`;
+    if (f.error) li.style.color = css('--bad');
+    notes.appendChild(li);
+  }
+  renderFindData();
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function renderFindData() {
+  const lat = num('lat', 0), lon = num('lon', 0);
+  const t = readRecStart();
+  const when = Number.isFinite(t) ? new Date(t * 1000).toISOString() : null;
+  const replay = when ? `&replay=${when.slice(0, 10)}-${when.slice(11, 16)}` : '';
+  $('findData').innerHTML = `
+    <p>Find which aircraft were overhead, then export their tracks for that window.</p>
+    <p><a href="https://globe.adsbexchange.com/?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}&zoom=11${replay}" target="_blank" rel="noopener">ADS-B Exchange map${when ? ' replay at the recording time' : ''}</a>. Click an aircraft to see its hex code and trace.</p>
+    <p><a href="https://opensky-network.org/" target="_blank" rel="noopener">OpenSky Network</a> has historical state vectors for research accounts. Export them to CSV with pyopensky or the traffic library.</p>
+    <p><a href="https://www.flightradar24.com/${lat.toFixed(2)},${lon.toFixed(2)}/11" target="_blank" rel="noopener">FlightRadar24</a> offers playback, and CSV or KML export per flight with a subscription.</p>
+    <p>This page cannot fetch flight data itself, because its sandbox blocks network requests, so download the files and add them above.</p>`;
+}
+$('fileFlights').addEventListener('change', async (e) => {
+  for (const file of e.target.files) {
+    try { st.flights.push({ name: file.name, text: await readFileText(file) }); }
+    catch (err) { st.flights.push({ name: file.name, text: '', error: err.message }); }
+  }
+  e.target.value = '';
+  if (st.demo) leaveDemoFlights();
+  parseAllFlights();
+});
+function leaveDemoFlights() { st.flights = st.flights.filter((f) => !f.demo); }
+$('btnClearFlights').addEventListener('click', () => { st.flights = []; renderFlights(); });
+$('altUnits').addEventListener('change', parseAllFlights);
+$('btnCenter').addEventListener('click', () => {
+  const acs = allAircraft();
+  if (!acs.length) { setStatus('locStatus', 'Add flight data first.', true); return; }
+  const la = [], lo = [];
+  const t0 = readRecStart();
+  for (const a of acs) for (let i = 0; i < a.t.length; i++) if (!Number.isFinite(t0) || Math.abs(a.t[i] - t0) < 900) { la.push(a.lat[i]); lo.push(a.lon[i]); }
+  if (!la.length) { setStatus('locStatus', 'No flight positions within 15 minutes of the recording time.', true); return; }
+  $('lat').value = E.median(la).toFixed(4); $('lon').value = E.median(lo).toFixed(4);
+  renderFindData();
+});
+
+// ------------------------------------------------------------------ settings
+function num(id, def) { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : def; }
+function readRecStart() {
+  if (!$('timeKnown').checked) return NaN;
+  const d = $('recDate').value, t = $('recTime').value;
+  if (!d || !t) return NaN;
+  const ms = Date.parse(`${d}T${t.length === 5 ? t + ':00' : t}Z`);
+  return Number.isFinite(ms) ? ms / 1000 : NaN;
+}
+function setRecStart(unix) {
+  const iso = new Date(unix * 1000).toISOString();
+  $('recDate').value = iso.slice(0, 10); $('recTime').value = iso.slice(11, 19);
+}
+$('timeKnown').addEventListener('change', () => { $('timeFields').hidden = !$('timeKnown').checked; renderFindData(); });
+for (const id of ['lat', 'lon', 'recDate', 'recTime']) $(id).addEventListener('change', renderFindData);
+
+// ------------------------------------------------------------------ locate
+async function scoreParallel(cands, job, hints, label, p0, p1) {
+  const n = pool.workers.length, chunk = Math.ceil(cands.length / n), parts = [], prog = new Array(n).fill(0);
+  for (let w = 0; w < n; w++) {
+    const a = w * chunk, b = Math.min(cands.length, a + chunk);
+    if (a >= b) continue;
+    const sub = Object.assign({}, job, { cands: cands.slice(a, b) });
+    if (hints) { sub.hints = hints.slice(a, b); sub.hintTol = 3; }
+    parts.push(pool.call(w, { type: 'score', job: sub }, (m) => { prog[w] = m.p; setProg($('locProg'), p0 + (p1 - p0) * prog.reduce((s, v) => s + v, 0) / n, label); }).then((r) => ({ a, r: r.res })));
+  }
+  const done = await Promise.all(parts);
+  const nE = job.events.length;
+  const out = { rms: new Float64Array(cands.length), off: new Float64Array(cands.length), evTrack: new Int32Array(cands.length * nE), evRms: new Float64Array(cands.length * nE) };
+  for (const { a, r } of done) { out.rms.set(r.rms, a); out.off.set(r.off, a); out.evTrack.set(r.evTrack, a * nE); out.evRms.set(r.evRms, a * nE); }
+  return out;
+}
+
+let locating = false;
+async function locate() {
+  if (locating) return;
+  const passes = st.passes.filter((p, i) => st.include[i]);
+  const acs = allAircraft();
+  if (!passes.length) { setStatus('locStatus', 'Tick at least one flyover to use.', true); return; }
+  if (!acs.length) { setStatus('locStatus', 'Add flight data that covers the recording.', true); return; }
+  const lat = num('lat', NaN), lon = num('lon', NaN);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { setStatus('locStatus', 'Enter a centre latitude and longitude.', true); return; }
+  const radius = Math.min(30000, Math.max(500, num('radius', 4) * 1000));
+  let step = Math.max(25, num('step', 200));
+  const nSide = 2 * Math.round(radius / step) + 1;
+  if (nSide * nSide > 12000) { step = Math.ceil(radius / 54 / 25) * 25; $('step').value = step; }
+  const timeKnown = $('timeKnown').checked, recStart = readRecStart();
+  if (timeKnown && !Number.isFinite(recStart)) { setStatus('locStatus', 'Enter the recording date and time, or untick "I know when the recording started".', true); return; }
+  locating = true; $('btnLocate').disabled = true; setStatus('locStatus', '');
+  try {
+    const c = E.soundSpeed(num('temp', 15));
+    const ws = num('wind', 0), wd = num('windDir', 270) * Math.PI / 180;
+    const wind = [-ws * Math.sin(wd), -ws * Math.cos(wd)]; // "from" direction -> blowing toward
+    const elev = num('elev', 0), micH = num('micH', 1.5);
+    const frame = new E.LocalFrame(lat, lon, elev);
+    const grid = E.makeGrid(radius, step).map(([e, n]) => [e, n, micH]);
+    const tracks = acs.flatMap((a) => E.prepareTrack(a, frame, { cropRadius: radius + 25000 }));
+    if (!tracks.length) throw new Error('None of the flight tracks pass within 25 km of the search area. Check the centre or the files.');
+    const events = E.prepareEvents(passes);
+    const job = { tracks, events, c, wind, mode: timeKnown ? 'known' : 'unknown', recStart, tol: Math.max(0.5, num('recTol', 2)), minCov: 0.8 };
+    setProg($('locProg'), 0, 'Scoring the grid…');
+    const coarse = await scoreParallel(grid, job, null, `Scoring ${grid.length} grid points…`, 0, 0.75);
+    if (!Array.from(coarse.rms).some(Number.isFinite)) throw new Error('No grid point can explain every ticked flyover with these tracks. Untick a flyover, widen the area, or add flight data for the right time.');
+    const fine = E.refineCandidates(grid, coarse.rms, coarse.off, step);
+    const fineRes = await scoreParallel(fine.pts, job, fine.hints, `Refining ${fine.pts.length} points near the best areas…`, 0.75, 1);
+    const neff = passes.reduce((s, p) => s + p.neff, 0);
+    const an = E.analyze(fine.pts, fineRes.rms, neff, step / 4);
+    st.results = { frame, grid, coarse, fine, fineRes, an, tracks, events, passes, passIdx: st.passes.map((p, i) => (st.include[i] ? i : -1)).filter((i) => i >= 0), c, wind, radius, step, timeKnown, recStart, truncated: fine.truncated };
+    $('locProg').hidden = true;
+    selectPoint(an.best >= 0 ? { kind: 'fine', i: an.best } : null);
+    renderResults();
+  } catch (err) {
+    $('locProg').hidden = true;
+    setStatus('locStatus', err.message, true);
+  } finally {
+    locating = false; $('btnLocate').disabled = false;
+  }
+}
+$('btnLocate').addEventListener('click', locate);
+
+// ------------------------------------------------------------------ results
+function pointInfo(sel) {
+  const R = st.results;
+  if (!R || !sel) return null;
+  const src = sel.kind === 'fine' ? { pts: R.fine.pts, res: R.fineRes } : { pts: R.grid, res: R.coarse };
+  const X = src.pts[sel.i], nE = R.events.length;
+  const [la, lo] = R.frame.toGeo(X[0], X[1], 0);
+  return { X, lat: la, lon: lo, rms: src.res.rms[sel.i], off: src.res.off[sel.i], ev: R.events.map((_, e) => ({ a: src.res.evTrack[sel.i * nE + e], rms: src.res.evRms[sel.i * nE + e] })) };
+}
+
+function selectPoint(sel) {
+  st.selected = sel;
+  const R = st.results, info = pointInfo(sel);
+  if (info && Number.isFinite(info.rms)) {
+    const curves = [];
+    R.passes.forEach((p, e) => {
+      const tr = R.tracks[info.ev[e].a];
+      if (!tr) return;
+      for (const r of R.events[e].ridges) {
+        const tg = []; for (let t = Math.max(0, r.t[0] - 15); t <= Math.min(st.meta.duration, r.t[r.t.length - 1] + 15); t += 0.5) tg.push(t);
+        const pc = E.predictCurve(tr, info.X, info.off, R.c, R.wind, r, tg);
+        if (pc) curves.push({ t: tg, f: pc.f });
+      }
+    });
+    sel.curves = curves;
+  }
+  drawSpec(); drawMap(); renderAnswer();
+}
+
+function verdict(an) {
+  if (!an || an.best < 0) return { cls: 'bad', text: 'No fit' };
+  const cl = an.clusters;
+  if (cl.length > 1) return { cls: 'warn', text: `${cl.length} separate areas fit` };
+  if (cl[0].major > 4 * cl[0].minor && cl[0].major > 800) return { cls: 'warn', text: 'Along a line, not a point' };
+  return { cls: 'good', text: `Pinned to about ${fmtDist(Math.max(cl[0].major, 25))}` };
+}
+
+function renderResults() {
+  const R = st.results, v = verdict(R.an);
+  $('verdict').innerHTML = `<span class="pill ${v.cls}">${v.text}</span>`;
+  drawMap(); renderAnswer(); renderAreas();
+}
+
+function renderAnswer() {
+  const R = st.results, box = $('answer');
+  if (!R) { box.innerHTML = '<p class="muted">The answer appears here after Locate.</p>'; return; }
+  const an = R.an, best = pointInfo({ kind: 'fine', i: an.best }), sel = pointInfo(st.selected);
+  if (!best) { box.innerHTML = '<p class="muted">No point fits.</p>'; return; }
+  const cl = an.clusters, v = verdict(an);
+  let why = '';
+  if (v.cls === 'good') why = `One compact area fits every ticked flyover. The 95% region is about ${fmtDist(cl[0].major)} by ${fmtDist(cl[0].minor)}.`;
+  else if (cl.length > 1) why = R.passes.length === 1
+    ? `A single straight pass is symmetric. Points on both sides of the flight path${R.timeKnown ? '' : ', and anywhere along it,'} hear the same curve. ${R.timeKnown ? 'Add' : 'Add the recording time or'} a second flyover to narrow it down.`
+    : 'More than one area explains the flyovers. Compare their misfits below. Adding the recording time or another flyover usually separates them.';
+  else why = `Without a timestamp, this flyover only fixes your distance from the flight line. Tick "I know when the recording started" or add a second flyover.`;
+  const truth = st.demo && st.demo.truth ? (() => { const tX = R.frame.toENU(st.demo.truth.lat, st.demo.truth.lon, R.frame.h0); return Math.hypot(tX[0] - best.X[0], tX[1] - best.X[1]); })() : null;
+  const show = sel && Number.isFinite(sel.rms) ? sel : best;
+  const isBest = show === best || (st.selected && st.selected.kind === 'fine' && st.selected.i === an.best);
+  const evRows = '<dd>' + R.passes.map((p, e) => {
+    const a = R.tracks[show.ev[e].a], col = passColor(R.passIdx[e], true);
+    return `<div><span style="color:${col}">■</span> Flyover ${R.passIdx[e] + 1}: ${a ? escapeHtml(a.label && a.label !== a.id ? `${a.label} (${a.id})` : a.id) : '–'} · ${Number.isFinite(show.ev[e].rms) ? show.ev[e].rms.toFixed(2) : '–'} Hz</div>`;
+  }).join('') + '</dd>';
+  box.innerHTML = `
+    <div><div class="lbl">${isBest ? 'Best match' : 'Selected point'}</div>
+      <div class="coords">${show.lat.toFixed(5)}, ${show.lon.toFixed(5)}</div></div>
+    <div class="btnrow">
+      <button type="button" id="btnCopy">Copy coordinates</button>
+      <a href="https://www.openstreetmap.org/?mlat=${show.lat.toFixed(5)}&mlon=${show.lon.toFixed(5)}#map=16/${show.lat.toFixed(5)}/${show.lon.toFixed(5)}" target="_blank" rel="noopener">Open in OpenStreetMap</a>
+      <button type="button" id="btnDl" hidden>Download results CSV</button>
+    </div>
+    <p class="explain">${why}</p>
+    <dl class="kv">
+      <dt>Misfit</dt><dd class="num">${Number.isFinite(show.rms) ? show.rms.toFixed(3) : '–'} Hz RMS${isBest ? '' : ` (best ${best.rms.toFixed(3)} Hz)`}</dd>
+      <dt>Started</dt><dd class="num">${fmtUTC(show.off)}${R.timeKnown ? ` (${(show.off - R.recStart >= 0 ? '+' : '') + (show.off - R.recStart).toFixed(2)} s vs given)` : ''}</dd>
+      <dt>Aircraft</dt>${evRows}
+      ${truth !== null ? `<dt>Demo truth</dt><dd class="num">${fmtDist(truth)} from the best match</dd>` : ''}
+    </dl>
+    ${R.truncated ? '<p class="small muted">The near-best area was too large to refine fully, so only its best 300 cells were refined.</p>' : ''}`;
+  $('btnCopy').addEventListener('click', () => {
+    const text = `${show.lat.toFixed(5)}, ${show.lon.toFixed(5)}`;
+    const done = () => { $('btnCopy').textContent = 'Copied'; setTimeout(() => { const b = $('btnCopy'); if (b) b.textContent = 'Copy coordinates'; }, 1500); };
+    try { navigator.clipboard.writeText(text).then(done, () => { selectText(box.querySelector('.coords')); }); } catch (e) { selectText(box.querySelector('.coords')); }
+  });
+  setupDownload();
+}
+function selectText(el) { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+
+function renderAreas() {
+  const R = st.results, an = R.an;
+  if (!an.clusters.length) { $('areas').innerHTML = ''; return; }
+  const rows = an.clusters.slice(0, 8).map((c, k) => {
+    const X = R.fine.pts[c.best], [la, lo] = R.frame.toGeo(X[0], X[1], 0);
+    return `<tr data-i="${c.best}"><td>${k + 1}</td><td>${la.toFixed(5)}</td><td>${lo.toFixed(5)}</td><td>${c.rms.toFixed(3)}</td><td>${fmtDist(c.major)} × ${fmtDist(c.minor)}</td><td>${fmtUTC(R.fineRes.off[c.best])}</td></tr>`;
+  }).join('');
+  $('areas').innerHTML = `<table><thead><tr><th>Area</th><th>Lat</th><th>Lon</th><th>Misfit Hz</th><th>95% extent</th><th>Recording start (UTC)</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('areas').querySelectorAll('tbody tr').forEach((tr) => tr.addEventListener('click', () => selectPoint({ kind: 'fine', i: Number(tr.dataset.i) })));
+}
+
+let downloads = null;
+async function setupDownload() {
+  const b = $('btnDl');
+  if (!b) return;
+  if (downloads === null && window.claude && window.claude.use) { try { downloads = (await window.claude.use('downloads')) || false; } catch (e) { downloads = false; } }
+  if (!downloads) return;
+  b.hidden = false;
+  b.onclick = async () => {
+    const R = st.results, lines = ['kind,lat,lon,misfit_hz,in_95pct_region,rec_start_utc,' + R.passes.map((_, e) => `flyover${R.passIdx[e] + 1}_aircraft`).join(',')];
+    const add = (kind, pts, res, region) => pts.forEach((X, i) => {
+      const [la, lo] = R.frame.toGeo(X[0], X[1], 0), nE = R.events.length;
+      const acs = R.events.map((_, e) => { const t = R.tracks[res.evTrack[i * nE + e]]; return t ? t.id : ''; });
+      lines.push([kind, la.toFixed(6), lo.toFixed(6), Number.isFinite(res.rms[i]) ? res.rms[i].toFixed(4) : '', region ? region[i] : '', Number.isFinite(res.off[i]) ? new Date(res.off[i] * 1000).toISOString() : '', ...acs].join(','));
+    });
+    add('grid', R.grid, R.coarse, null); add('refined', R.fine.pts, R.fineRes, R.an.inRegion);
+    try { await downloads.save({ filename: 'flyover-locator-results.csv', data: lines.join('\n') }); } catch (e) { setStatus('locStatus', 'The download was not saved.', true); }
+  };
+}
+
+// ------------------------------------------------------------------ map
+const mapCv = $('map');
+function mapTx() {
+  const R = st.results, W = mapCv.clientWidth, r = R ? R.radius + R.step / 2 : 4000, pad = 28;
+  const s = (W - 2 * pad) / (2 * r);
+  return { W, r, pad, s, x: (e) => pad + (e + r) * s, y: (n) => pad + (r - n) * s, e: (x) => (x - pad) / s - r, n: (y) => r - (y - pad) / s };
+}
+function drawMap() {
+  const dpr = window.devicePixelRatio || 1, W = mapCv.clientWidth;
+  if (!W) return;
+  mapCv.width = Math.round(W * dpr); mapCv.height = Math.round(W * dpr);
+  const ctx = mapCv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = css('--heat-void'); ctx.fillRect(0, 0, W, W);
+  const R = st.results;
+  ctx.font = '11px ' + css('--f-mono');
+  if (!R) {
+    ctx.fillStyle = css('--muted'); ctx.textAlign = 'center'; ctx.fillText(locating ? 'Scoring…' : 'Press Locate to map the misfit', W / 2, W / 2);
+    return;
+  }
+  const T = mapTx(), { coarse, grid, step, an, fine, fineRes } = R;
+  // heat: log misfit between best and the 90th percentile
+  const fin = Array.from(coarse.rms).filter(Number.isFinite).sort((a, b) => a - b);
+  const lo = Math.max(1e-3, an.rmsBest || fin[0] || 1), hi = Math.max(lo * 4, fin[Math.floor(0.9 * (fin.length - 1))] || lo * 10);
+  const cB = hexToRgb(css('--heat-best')), cM = hexToRgb(css('--heat-mid')), cW = hexToRgb(css('--heat-worst'));
+  const cell = step * T.s + 0.6;
+  grid.forEach((X, i) => {
+    const v = coarse.rms[i];
+    let col;
+    if (!Number.isFinite(v)) col = null;
+    else { const q = Math.max(0, Math.min(1, Math.log(v / lo) / Math.log(hi / lo))); col = q < 0.5 ? mix(cB, cM, q * 2) : mix(cM, cW, (q - 0.5) * 2); }
+    if (!col) return;
+    ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+    ctx.fillRect(T.x(X[0]) - cell / 2, T.y(X[1]) - cell / 2, cell, cell);
+  });
+  // 95% region (refined points)
+  ctx.fillStyle = css('--region');
+  const fc = (step / 4) * T.s + 0.6;
+  fine.pts.forEach((X, i) => { if (an.inRegion[i]) ctx.fillRect(T.x(X[0]) - fc / 2, T.y(X[1]) - fc / 2, fc, fc); });
+  // tracks
+  ctx.save(); ctx.beginPath(); ctx.rect(T.pad, T.pad, W - 2 * T.pad, W - 2 * T.pad); ctx.clip();
+  const bestInfo = pointInfo({ kind: 'fine', i: an.best });
+  const used = new Map();
+  if (bestInfo) R.passes.forEach((_, e) => { if (bestInfo.ev[e].a >= 0) used.set(bestInfo.ev[e].a, R.passIdx[e]); });
+  R.tracks.forEach((tr, a) => {
+    const hl = used.has(a);
+    ctx.strokeStyle = hl ? passColor(used.get(a), true) : css('--track');
+    ctx.lineWidth = hl ? 2.2 : 1; ctx.globalAlpha = hl ? 1 : 0.7;
+    ctx.beginPath();
+    for (let j = 0; j < tr.N; j += 4) { const x = T.x(tr.px[j]), y = T.y(tr.py[j]); if (j) ctx.lineTo(x, y); else ctx.moveTo(x, y); }
+    ctx.stroke();
+    // direction arrow where the track enters the view, label near where it leaves
+    let jIn = -1, jOut = -1;
+    for (let j = 0; j < tr.N; j += 2) if (Math.max(Math.abs(tr.px[j]), Math.abs(tr.py[j])) <= 0.86 * T.r) { if (jIn < 0) jIn = j; jOut = j; }
+    if (jIn >= 0) {
+      ctx.fillStyle = ctx.strokeStyle;
+      const j2 = Math.min(tr.N - 1, jIn + 8), ang = Math.atan2(-(tr.py[j2] - tr.py[jIn]), tr.px[j2] - tr.px[jIn]);
+      const ax = T.x(tr.px[jIn]), ay = T.y(tr.py[jIn]);
+      ctx.beginPath(); ctx.moveTo(ax + 8 * Math.cos(ang), ay + 8 * Math.sin(ang)); ctx.lineTo(ax + 7 * Math.cos(ang + 2.5), ay + 7 * Math.sin(ang + 2.5)); ctx.lineTo(ax + 7 * Math.cos(ang - 2.5), ay + 7 * Math.sin(ang - 2.5)); ctx.fill();
+      ctx.globalAlpha = 1; ctx.fillStyle = hl ? ctx.strokeStyle : css('--muted');
+      const lx = T.x(tr.px[jOut]), ly = T.y(tr.py[jOut]);
+      ctx.textAlign = lx > W / 2 ? 'right' : 'left'; ctx.textBaseline = ly > W / 2 ? 'bottom' : 'top';
+      ctx.fillText(tr.label || tr.id, lx + (lx > W / 2 ? -6 : 6), ly + (ly > W / 2 ? -6 : 6));
+    }
+    ctx.globalAlpha = 1;
+  });
+  ctx.restore();
+  // truth (demo), clusters, best, selection
+  if (st.demo && st.demo.truth) {
+    const tX = R.frame.toENU(st.demo.truth.lat, st.demo.truth.lon, R.frame.h0);
+    ctx.strokeStyle = css('--ink'); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(T.x(tX[0]), T.y(tX[1]), 9, 0, 2 * Math.PI); ctx.stroke();
+    ctx.fillStyle = css('--ink'); ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText('demo truth', T.x(tX[0]) - 13, T.y(tX[1]));
+  }
+  an.clusters.slice(0, 8).forEach((c, k) => {
+    if (k === 0) return;
+    const X = fine.pts[c.best], x = T.x(X[0]), y = T.y(X[1]);
+    ctx.fillStyle = css('--panel'); ctx.strokeStyle = css('--ink'); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, 8, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = css('--ink'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(String(k + 1), x, y + 0.5);
+  });
+  if (bestInfo) star(ctx, T.x(bestInfo.X[0]), T.y(bestInfo.X[1]), 9, css('--panel'), css('--ink'));
+  const sel = pointInfo(st.selected);
+  if (sel && !(st.selected.kind === 'fine' && st.selected.i === an.best)) {
+    ctx.strokeStyle = css('--accent'); ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(T.x(sel.X[0]), T.y(sel.X[1]), 7, 0, 2 * Math.PI); ctx.stroke();
+  }
+  // frame: ticks in km, north arrow, scale bar
+  ctx.strokeStyle = css('--rule'); ctx.lineWidth = 1; ctx.strokeRect(T.pad, T.pad, W - 2 * T.pad, W - 2 * T.pad);
+  ctx.fillStyle = css('--muted'); ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const km = R.radius / 1000, tick = km > 12 ? 5 : km > 5 ? 2 : 1;
+  for (let k = -Math.floor(km / tick) * tick; k <= km + 1e-9; k += tick) {
+    ctx.fillText(`${k}`, T.x(k * 1000), W - T.pad + 6);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(`${k}`, T.pad - 6, T.y(k * 1000)); ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillText('km from centre', T.pad, 8);
+  ctx.textAlign = 'right'; ctx.fillText('N ↑', W - T.pad, 8);
+  if (bestInfo) drawInset(ctx, T, bestInfo);
+}
+
+// zoomed view around the best match: refined points, the 95% region, truth in the demo
+function drawInset(ctx, T, bestInfo) {
+  const R = st.results, an = R.an, W = T.W, S = Math.round(0.36 * (W - 2 * T.pad));
+  const x0 = W - T.pad - S - 6, y0 = T.pad + 6;
+  const half = Math.max(250, Math.min(R.step * 2.5, 3 * an.clusters[0].major));
+  const s = S / (2 * half), cx = bestInfo.X[0], cy = bestInfo.X[1];
+  const ix = (e) => x0 + (e - cx + half) * s, iy = (n) => y0 + (cy + half - n) * s;
+  ctx.save();
+  ctx.fillStyle = css('--heat-void'); ctx.fillRect(x0, y0, S, S);
+  ctx.beginPath(); ctx.rect(x0, y0, S, S); ctx.clip();
+  const vals = [];
+  R.fine.pts.forEach((X, i) => { if (Math.abs(X[0] - cx) <= half && Math.abs(X[1] - cy) <= half && Number.isFinite(R.fineRes.rms[i])) vals.push(R.fineRes.rms[i]); });
+  vals.sort((a, b) => a - b);
+  const lo = Math.max(1e-3, an.rmsBest), hi = Math.max(lo * 1.5, vals[Math.floor(0.95 * (vals.length - 1))] || lo * 3);
+  const cB = hexToRgb(css('--heat-best')), cM = hexToRgb(css('--heat-mid')), cW = hexToRgb(css('--heat-worst'));
+  const cell = (R.step / 4) * s + 0.6;
+  R.fine.pts.forEach((X, i) => {
+    if (Math.abs(X[0] - cx) > half + R.step || Math.abs(X[1] - cy) > half + R.step) return;
+    const v = R.fineRes.rms[i];
+    if (!Number.isFinite(v)) return;
+    const q = Math.max(0, Math.min(1, Math.log(v / lo) / Math.log(hi / lo)));
+    const col = q < 0.5 ? mix(cB, cM, q * 2) : mix(cM, cW, (q - 0.5) * 2);
+    ctx.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+    ctx.fillRect(ix(X[0]) - cell / 2, iy(X[1]) - cell / 2, cell, cell);
+    if (an.inRegion[i]) { ctx.strokeStyle = css('--region'); ctx.lineWidth = 2; ctx.strokeRect(ix(X[0]) - cell / 2 + 1, iy(X[1]) - cell / 2 + 1, cell - 2, cell - 2); }
+  });
+  if (st.demo && st.demo.truth) {
+    const tX = R.frame.toENU(st.demo.truth.lat, st.demo.truth.lon, R.frame.h0);
+    ctx.strokeStyle = css('--ink'); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(ix(tX[0]), iy(tX[1]), 7, 0, 2 * Math.PI); ctx.stroke();
+  }
+  star(ctx, ix(cx), iy(cy), 8, css('--panel'), css('--ink'));
+  ctx.restore();
+  ctx.strokeStyle = css('--ink'); ctx.lineWidth = 1; ctx.strokeRect(x0, y0, S, S);
+  ctx.fillStyle = css('--ink'); ctx.font = '11px ' + css('--f-mono'); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(`${fmtDist(2 * half)} wide`, x0 + 6, y0 + 5);
+}
+function star(ctx, x, y, r, fill, stroke) {
+  ctx.beginPath();
+  for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * 0.45 : r; ctx.lineTo(x + rr * Math.cos(a), y + rr * Math.sin(a)); }
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke();
+}
+function nearestPoint(e, n) {
+  const R = st.results;
+  let best = null, bd = Infinity;
+  R.fine.pts.forEach((X, i) => { const d = Math.hypot(X[0] - e, X[1] - n); if (d < bd) { bd = d; best = { kind: 'fine', i }; } });
+  if (bd > R.step / 4) {
+    const k = Math.round(R.radius / R.step), i = Math.round(e / R.step) + k, j = Math.round(n / R.step) + k;
+    if (i >= 0 && j >= 0 && i <= 2 * k && j <= 2 * k) return { kind: 'grid', i: j * (2 * k + 1) + i };
+  }
+  return best;
+}
+mapCv.addEventListener('pointermove', (ev) => {
+  const R = st.results, tip = $('tip');
+  if (!R) return;
+  const rect = mapCv.getBoundingClientRect(), x = ev.clientX - rect.left, y = ev.clientY - rect.top, T = mapTx();
+  const p = nearestPoint(T.e(x), T.n(y)), info = pointInfo(p);
+  if (!info || x < T.pad || y < T.pad || x > T.W - T.pad || y > T.W - T.pad) { tip.hidden = true; return; }
+  tip.hidden = false;
+  tip.style.left = `${x}px`; tip.style.top = `${y}px`;
+  tip.textContent = `${info.lat.toFixed(5)}, ${info.lon.toFixed(5)} · ${Number.isFinite(info.rms) ? info.rms.toFixed(2) + ' Hz' : 'no aircraft fits'}`;
+});
+mapCv.addEventListener('pointerleave', () => { $('tip').hidden = true; });
+mapCv.addEventListener('click', (ev) => {
+  const R = st.results;
+  if (!R) return;
+  const rect = mapCv.getBoundingClientRect(), T = mapTx();
+  const p = nearestPoint(T.e(ev.clientX - rect.left), T.n(ev.clientY - rect.top));
+  if (p) selectPoint(p);
+});
+
+// ------------------------------------------------------------------ demo + boot
+async function loadDemo() {
+  const demo = E.makeDemo(7);
+  st.demo = demo;
+  $('demoTag').hidden = false;
+  $('audioInfo').textContent = 'demo-flyovers.wav · 2:00 · synthetic: two aircraft, pink noise, 120 Hz hum';
+  $('lat').value = demo.center.lat.toFixed(4); $('lon').value = demo.center.lon.toFixed(4);
+  $('radius').value = 4; $('step').value = 200; $('elev').value = demo.groundElev; $('micH').value = demo.micHeight; $('temp').value = demo.tempC;
+  $('wind').value = 0; $('timeKnown').checked = false; $('timeFields').hidden = true; setRecStart(demo.recStart); $('metaHint').hidden = true;
+  st.flights = [{ name: 'demo-adsb.csv', text: demo.csv, demo: true }];
+  parseAllFlights();
+  st.results = null; drawMap(); renderAnswer(); $('verdict').innerHTML = '';
+  await analyse(demo.samples, demo.sr, 'demo');
+  await locate();
+}
+$('btnDemo').addEventListener('click', () => { loadDemo().catch((e) => setStatus('locStatus', e.message, true)); });
+
+$('fileAudio').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    setProg($('audioProg'), 0, 'Decoding…');
+    const rec = await decodeRecording(file);
+    st.demo = null; $('demoTag').hidden = true;
+    leaveDemoFlights(); renderFlights();
+    $('audioInfo').textContent = `${file.name} · ${fmtClock(rec.duration)}${rec.truncated ? ' · first 15:00 analysed' : ''}`;
+    st.results = null; drawMap(); renderAnswer(); $('verdict').innerHTML = ''; $('areas').innerHTML = '';
+    const hint = $('metaHint');
+    if (rec.created) {
+      hint.hidden = false;
+      hint.innerHTML = `The file's metadata says it was created at ${fmtUTC(rec.created)}. Phones usually stamp the start, but check it. <button type="button" class="link" id="useMeta">Use this time</button>`;
+      $('useMeta').addEventListener('click', () => { $('timeKnown').checked = true; $('timeFields').hidden = false; setRecStart(rec.created); $('recTol').value = 5; renderFindData(); });
+    } else {
+      hint.hidden = false;
+      hint.textContent = `No creation time found in the file. Its last-modified date is ${fmtUTC(file.lastModified / 1000)}, which is often when it was saved or copied, not when it was recorded.`;
+    }
+    await analyse(rec.samples, rec.sr, file.name);
+  } catch (err) {
+    $('audioProg').hidden = true;
+    setStatus('locStatus', err.message, true);
+  }
+});
+
+let rz = null;
+window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(() => { drawSpec(); drawMap(); }, 120); });
+const rerender = () => { drawSpec(); drawMap(); if (st.results) renderAnswer(); };
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rerender); } catch (e) { /* old browsers */ }
+new MutationObserver(rerender).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+drawSpec(); drawMap(); renderFindData();
+loadDemo().catch((e) => { $('scopeMsg').textContent = e.message; setStatus('locStatus', e.message, true); });
+})();
+</script>
