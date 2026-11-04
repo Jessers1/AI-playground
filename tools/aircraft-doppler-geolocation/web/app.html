@@ -231,6 +231,12 @@ tbody tr { cursor: pointer; }
             </div>
           </div>
           <div class="hint" id="metaHint" hidden></div>
+          <div class="field"><label for="method">Method</label>
+            <select id="method">
+              <option value="trace">Trace falling tones (clean or synthetic recordings)</option>
+              <option value="direct">Match flight data directly (real-world recordings)</option>
+            </select></div>
+          <p class="hint" id="methodHint"></p>
           <button type="button" class="primary" id="btnLocate">Locate</button>
           <div class="progress" id="locProg" hidden><div class="bar"><i></i></div><div class="status"></div></div>
           <div class="status" id="locStatus"></div>
@@ -274,8 +280,8 @@ tbody tr { cursor: pointer; }
             </div>
           </div>
           <div class="legend">
-            <span><i class="grad"></i>misfit: good → poor</span>
-            <span><i style="background: var(--region)"></i>95% confidence region</span>
+            <span id="lgHeat"><i class="grad"></i>misfit: good → poor</span>
+            <span id="lgRegion"><i style="background: var(--region)"></i>95% confidence region</span>
             <span><i style="background: var(--track); height: 2px"></i>ADS-B track</span>
             <span>★ best point · tap the map to compare a point's predicted curves</span>
           </div>
@@ -292,6 +298,7 @@ tbody tr { cursor: pointer; }
         <li>A narrow-band spectrogram is searched for falling tones. Each tone is fitted with a straight-pass Doppler model for base tone, speed, closest distance and closest-approach time.</li>
         <li>Each tone is scored against the same search run on the time-reversed recording. A real flyover only falls in pitch, so that run measures what noise alone can produce.</li>
         <li>For every grid point and every start time, the exact curve that point would have heard is predicted from each ADS-B track, including wind and temperature. All flyovers share one clock.</li>
+        <li>Direct matching skips step 1. It slides each aircraft's predicted curve over the spectrogram inside the tone bands, so faint or broken jet tones still count.</li>
       </ol>
     </section>
     <section>
@@ -300,7 +307,7 @@ tbody tr { cursor: pointer; }
         <li>One straight pass with no timestamp fixes only your distance from the flight line. Add the time or a second flyover.</li>
         <li>Even with the time, a straight level pass cannot tell which side of the track you were on, so expect two areas.</li>
         <li>The 95% region assumes the flight data is right. Barometric altitude, coarse tracks and gusty wind make the real uncertainty larger.</li>
-        <li>So far this has only been checked on synthetic recordings, not on a real recording with known ground truth.</li>
+        <li>On real recordings (field recordings with published coordinates, plus ADS-B Exchange history), direct matching put a Toulouse departure recording 0.9 km from the recordist. It named the right aircraft and start time, using the logged minute ±1 and two marked tone bands. A London recording did not match: no logged aircraft explains its tone from the true spot. A street microphone gave nothing usable over traffic noise.</li>
       </ul>
     </section>
     <section>
@@ -333,13 +340,18 @@ function makeHandler(E, post) {
         const z = E.whiten(spec);
         const det = E.detectFlyovers(spec, z, { c: m.c }, (p) => post({ type: 'progress', id: m.id, stage: 'Searching for flyovers', p: 0.1 + 0.9 * p }));
         S = { spec, z };
+        post({ type: 'progress', id: m.id, stage: 'Building the wide spectrogram', p: 0.99 });
+        const L = E.guidedSpectrogram(m.samples, m.sr, {});
         const meta = { nT: spec.nT, nF: spec.nF, times: spec.times, freqs: spec.freqs, df: spec.df, hop: spec.hop, win: spec.win, duration: spec.duration };
-        post({ type: 'analyzed', id: m.id, spec: meta, z: z.slice(), detections: det.detections, nullMax: det.nullMax, threshold: det.threshold, nullCount: det.nullCount });
+        post({ type: 'analyzed', id: m.id, spec: meta, z: z.slice(), L, detections: det.detections, nullMax: det.nullMax, threshold: det.threshold, nullCount: det.nullCount });
       } else if (m.type === 'box') {
         if (!S) throw new Error('Load a recording first.');
         post(Object.assign({ type: 'box', id: m.id }, E.detectInBox(S.spec, S.z, m.box, { c: m.c })));
       } else if (m.type === 'score') {
         const res = E.scoreCandidates(m.job, (p) => post({ type: 'progress', id: m.id, p }));
+        post({ type: 'scored', id: m.id, res });
+      } else if (m.type === 'guided') {
+        const res = E.guidedScore(m.job, (p) => post({ type: 'progress', id: m.id, p }));
         post({ type: 'scored', id: m.id, res });
       }
     } catch (err) {
@@ -391,6 +403,7 @@ const pool = new Pool(nWorkers);
 const st = {
   demo: null, audioName: '', spec: null, z: null, dets: [], manual: [], passes: [], include: [],
   nullMax: 0, threshold: 0, flights: [], results: null, selected: null, specImg: null, meta: null,
+  L: null, bands: [],
 };
 
 // ------------------------------------------------------------------ helpers
@@ -451,8 +464,8 @@ async function analyse(samples, sr, label) {
   const res = await pool.call(0, { type: 'analyze', samples, sr, c }, (m) => setProg(prog, m.p, `${m.stage}…`));
   prog.hidden = true;
   st.audioName = label;
-  st.meta = res.spec; st.z = res.z; st.dets = res.detections; st.nullMax = res.nullMax; st.threshold = res.threshold;
-  st.manual = []; st.results = null; st.selected = null;
+  st.meta = res.spec; st.z = res.z; st.L = res.L; st.dets = res.detections; st.nullMax = res.nullMax; st.threshold = res.threshold;
+  st.manual = []; st.bands = []; st.results = null; st.selected = null;
   rebuildPasses(true);
   buildSpecImage();
   $('scopeMsg').hidden = true;
@@ -479,8 +492,11 @@ function rebuildPasses(resetInclude) {
 }
 
 // ------------------------------------------------------------------ spectrogram view
-const F_LO = 20, F_HI = 900;
+const view = { fLo: 20, fHi: 900 };
 function buildSpecImage() {
+  if (st.L) return buildSpecImageLog();
+  view.fLo = 20; view.fHi = 900;
+  const F_LO = view.fLo, F_HI = view.fHi;
   const { nT, nF, freqs, df } = st.meta, z = st.z;
   const W = Math.min(nT, 2400), H = 340;
   const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
@@ -515,17 +531,51 @@ function buildSpecImage() {
   st.specImg = cv;
 }
 
+function specLut() {
+  const stops = [[0, [7, 16, 25]], [0.35, [18, 53, 77]], [0.6, [31, 122, 140]], [0.82, [230, 162, 60]], [1, [255, 244, 214]]];
+  const lut = [];
+  for (let i = 0; i < 256; i++) {
+    const v = i / 255; let k = 0;
+    while (k < stops.length - 2 && v > stops[k + 1][0]) k++;
+    const [a, ca] = stops[k], [b, cb] = stops[k + 1];
+    lut.push(mix(ca, cb, (v - a) / (b - a)));
+  }
+  return lut;
+}
+// 40 Hz to 2.5 kHz (8 kHz audio) on a log axis: shows jet fan tones as well as low engine tones
+function buildSpecImageLog() {
+  const L = st.L, lut = specLut();
+  view.fLo = L.fLo; view.fHi = L.fHi;
+  const W = Math.min(L.nT, 2400), H = 340;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(W, H);
+  const l0 = Math.log(view.fLo), l1 = Math.log(view.fHi);
+  for (let y = 0; y < H; y++) {
+    const la = l0 + (l1 - l0) * (H - 1 - y) / H, lb = l0 + (l1 - l0) * (H - y) / H;
+    const ka = Math.max(0, Math.floor((la - L.l0) / L.D)), kb = Math.min(L.nL - 1, Math.max(ka, Math.floor((lb - L.l0) / L.D)));
+    for (let x = 0; x < W; x++) {
+      const t0 = Math.floor(x * L.nT / W), t1 = Math.max(t0 + 1, Math.floor((x + 1) * L.nT / W));
+      let m = -9;
+      for (let t = t0; t < t1; t++) for (let k = ka; k <= kb; k++) { const v = L.zl[t * L.nL + k]; if (v > m) m = v; }
+      const c = lut[Math.max(0, Math.min(255, Math.round((m + 1) / 7 * 255)))], o = 4 * (y * W + x);
+      img.data[o] = c[0]; img.data[o + 1] = c[1]; img.data[o + 2] = c[2]; img.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  st.specImg = cv;
+}
+
 const specGeom = { padL: 46, padR: 10, padT: 10, padB: 26 };
 function specXY(cv, t, f) {
   const { padL, padR, padT, padB } = specGeom, W = cv.clientWidth, H = cv.clientHeight;
   const x = padL + (t / st.meta.duration) * (W - padL - padR);
-  const y = padT + (1 - (Math.log(f) - Math.log(F_LO)) / (Math.log(F_HI) - Math.log(F_LO))) * (H - padT - padB);
+  const y = padT + (1 - (Math.log(f) - Math.log(view.fLo)) / (Math.log(view.fHi) - Math.log(view.fLo))) * (H - padT - padB);
   return [x, y];
 }
 function specInv(cv, x, y) {
   const { padL, padR, padT, padB } = specGeom, W = cv.clientWidth, H = cv.clientHeight;
   const t = (x - padL) / (W - padL - padR) * st.meta.duration;
-  const f = Math.exp(Math.log(F_LO) + (1 - (y - padT) / (H - padT - padB)) * (Math.log(F_HI) - Math.log(F_LO)));
+  const f = Math.exp(Math.log(view.fLo) + (1 - (y - padT) / (H - padT - padB)) * (Math.log(view.fHi) - Math.log(view.fLo)));
   return [t, f];
 }
 
@@ -544,7 +594,7 @@ function drawSpec() {
   // axes
   ctx.fillStyle = css('--scope-ink'); ctx.strokeStyle = css('--scope-rule'); ctx.font = '11px ' + css('--f-mono'); ctx.lineWidth = 1;
   ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  for (const f of [25, 50, 100, 200, 400, 800]) { const [, y] = specXY(cv, 0, f); ctx.fillText(String(f), padL - 6, y); ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke(); ctx.globalAlpha = 1; }
+  for (const f of [25, 50, 100, 200, 400, 800, 1600].filter((q) => q >= view.fLo && q <= view.fHi)) { const [, y] = specXY(cv, 0, f); ctx.fillText(String(f), padL - 6, y); ctx.globalAlpha = 0.35; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke(); ctx.globalAlpha = 1; }
   ctx.save(); ctx.translate(11, padT + (H - padT - padB) / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText('Hz', 0, 0); ctx.restore();
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   const dur = st.meta.duration, pxPerS = (W - padL - padR) / dur;
@@ -557,6 +607,12 @@ function drawSpec() {
     const col = passColor(i, false), on = st.include[i];
     for (const r of p.ridges) drawRidge(ctx, cv, r, col, false, on ? 1 : 0.35);
   });
+  // tone bands marked for direct matching
+  for (const b of st.bands) {
+    const [x0, y0] = specXY(cv, b.t0, b.f1), [x1, y1] = specXY(cv, b.t1, b.f0);
+    ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1; ctx.strokeRect(x0, y0, x1 - x0, y1 - y0); ctx.setLineDash([]);
+  }
   // predicted curves at the selected map point
   if (st.selected && st.selected.curves) {
     ctx.setLineDash([5, 4]); ctx.lineWidth = 1.6; ctx.strokeStyle = '#ffffff';
@@ -595,11 +651,24 @@ function drawRidge(ctx, cv, d, color, faint, alpha = 1) {
   ctx.globalAlpha = 1;
 }
 
+function renderBands(box) {
+  st.bands.forEach((b, i) => {
+    const el = document.createElement('div');
+    el.className = 'pass';
+    el.innerHTML = `<span></span><span class="sw" style="background:#ffffff;outline:1px dashed var(--muted)"></span>
+      <div><div class="t">Tone band ${i + 1} <span class="muted small">marked ${fmtClock(b.t0)}–${fmtClock(b.t1)}</span></div>
+      <div class="meta"><b>${Math.round(b.f0)}–${Math.round(b.f1)} Hz</b> · used by direct matching</div></div>
+      <button type="button">Remove</button>`;
+    el.querySelector('button').addEventListener('click', () => { st.bands.splice(i, 1); renderPasses(); drawSpec(); });
+    box.appendChild(el);
+  });
+}
 function renderPasses() {
   const box = $('passes');
   box.innerHTML = '';
   if (!st.passes.length) {
-    box.innerHTML = '<p class="muted small">No flyover rose above the noise bar. If you can see a falling line, use Mark a flyover by hand.</p>';
+    box.innerHTML = '<p class="muted small">No flyover rose above the noise bar. On real recordings that is common: choose "Match flight data directly", then mark the bands where you can see tones.</p>';
+    renderBands(box);
     return;
   }
   st.passes.forEach((p, i) => {
@@ -620,6 +689,7 @@ function renderPasses() {
     const rm = el.querySelector('[data-rm]');
     if (rm) rm.addEventListener('click', () => { st.manual = st.manual.filter((r) => !p.ridges.includes(r)); rebuildPasses(false); renderPasses(); drawSpec(); });
   });
+  renderBands(box);
 }
 
 // box marking
@@ -652,8 +722,19 @@ specCv.addEventListener('pointerup', async () => {
   if (tb - ta < 4) { setStatus('locStatus', 'That box is shorter than 4 s. Drag a longer one.', true); return; }
   try {
     const res = await pool.call(0, { type: 'box', box: { t0: ta, t1: tb, f0: fa, f1: fb }, c: E.soundSpeed(num('temp', 15)) });
+    if ($('method').value === 'direct') {
+      st.bands.push({ t0: ta, t1: tb, f0: fa, f1: fb });
+      renderPasses(); drawSpec();
+      setStatus('locStatus', `Added a tone band, ${Math.round(fa)}–${Math.round(fb)} Hz. Direct matching will look for Doppler curves inside it.`);
+      if (res.error) return;
+    }
     if (res.error) { setStatus('locStatus', res.error, true); return; }
-    const d = res.detection; d.manual = true; d.accepted = true;
+    const d = res.detection;
+    if (!d.plausible) { // e.g. a steady or rising tone: not a straight flyover
+      if ($('method').value !== 'direct') setStatus('locStatus', `That tone does not fit a straight flyover (${d.reasons[0]}). Try "Match flight data directly" and mark it as a band.`, true);
+      return;
+    }
+    d.manual = true; d.accepted = true;
     st.manual.push(d);
     rebuildPasses(false); renderPasses(); drawSpec();
     setStatus('locStatus', `Added a flyover at ${Math.round(d.f0)} Hz. Press Locate to use it.`);
@@ -713,7 +794,7 @@ function renderFindData() {
     <p><a href="https://globe.adsbexchange.com/?lat=${lat.toFixed(4)}&lon=${lon.toFixed(4)}&zoom=11${replay}" target="_blank" rel="noopener">ADS-B Exchange map${when ? ' replay at the recording time' : ''}</a>. Click an aircraft to see its hex code and trace.</p>
     <p><a href="https://opensky-network.org/" target="_blank" rel="noopener">OpenSky Network</a> has historical state vectors for research accounts. Export them to CSV with pyopensky or the traffic library.</p>
     <p><a href="https://www.flightradar24.com/${lat.toFixed(2)},${lon.toFixed(2)}/11" target="_blank" rel="noopener">FlightRadar24</a> offers playback, and CSV or KML export per flight with a subscription.</p>
-    <p>This page cannot fetch flight data itself, because its sandbox blocks network requests, so download the files and add them above.</p>`;
+    <p>This page's sandbox blocks network requests, so it cannot fetch flight data itself. <b>fetch_adsb.py</b> in the project repository can. It logs live traffic while you record, or pulls any 1st-of-the-month date from ADS-B Exchange's free archive, and writes a CSV you can add here.</p>`;
 }
 $('fileFlights').addEventListener('change', async (e) => {
   for (const file of e.target.files) {
@@ -752,6 +833,12 @@ function setRecStart(unix) {
   $('recDate').value = iso.slice(0, 10); $('recTime').value = iso.slice(11, 19);
 }
 $('timeKnown').addEventListener('change', () => { $('timeFields').hidden = !$('timeKnown').checked; renderFindData(); });
+function renderMethodHint() {
+  $('methodHint').textContent = $('method').value === 'direct'
+    ? 'Slides each aircraft\'s predicted Doppler curve over the spectrogram inside the tone bands: ticked flyovers plus boxes you mark. It copes with broken, faint jet tones, but needs the start time to within a few minutes.'
+    : 'Fits each detected falling tone with a straight-pass model, then matches the fitted tones to flight tracks. Best when the tones are clean.';
+}
+$('method').addEventListener('change', () => { renderMethodHint(); renderPasses(); });
 for (const id of ['lat', 'lon', 'recDate', 'recTime']) $(id).addEventListener('change', renderFindData);
 
 // ------------------------------------------------------------------ locate
@@ -771,9 +858,40 @@ async function scoreParallel(cands, job, hints, label, p0, p1) {
   return out;
 }
 
+async function guidedParallel(cands, job, hints, label, p0, p1) {
+  const n = pool.workers.length, chunk = Math.ceil(cands.length / n), parts = [], prog = new Array(n).fill(0);
+  for (let w = 0; w < n; w++) {
+    const a = w * chunk, b = Math.min(cands.length, a + chunk);
+    if (a >= b) continue;
+    const sub = Object.assign({}, job, { cands: cands.slice(a, b) });
+    if (hints) { sub.hints = hints.slice(a, b); sub.hintTol = 4; }
+    parts.push(pool.call(w, { type: 'guided', job: sub }, (m) => { prog[w] = m.p; setProg($('locProg'), p0 + (p1 - p0) * prog.reduce((s, v) => s + v, 0) / n, label); }).then((r) => ({ a, r: r.res })));
+  }
+  const done = await Promise.all(parts);
+  const out = { score: new Float64Array(cands.length), off: new Float64Array(cands.length), trk: new Int32Array(cands.length), f0a: new Float64Array(cands.length), f0b: new Float64Array(cands.length) };
+  for (const { a, r } of done) for (const k of Object.keys(out)) out[k].set(r[k], a);
+  return out;
+}
+
+// Frequency bands for direct matching: each ticked flyover's tone range (a little wider), plus marked boxes.
+function directBands() {
+  const out = [];
+  st.passes.forEach((p, i) => {
+    if (!st.include[i]) return;
+    for (const r of p.ridges) { let lo = Infinity, hi = 0; for (const f of r.f) { lo = Math.min(lo, f); hi = Math.max(hi, f); } out.push([lo / 1.12, hi * 1.12]); }
+  });
+  for (const b of st.bands) out.push([b.f0, b.f1]);
+  const lo = st.L ? st.L.fLo : 40, hi = st.L ? st.L.fHi : 900;
+  const clipped = out.map(([a, b]) => [Math.max(lo, a), Math.min(hi, b)]).filter(([a, b]) => b > a * 1.02).sort((p, q) => p[0] - q[0]);
+  const merged = [];
+  for (const b of clipped) { const m = merged[merged.length - 1]; if (m && b[0] <= m[1]) m[1] = Math.max(m[1], b[1]); else merged.push(b.slice()); }
+  return merged;
+}
+
 let locating = false;
 async function locate() {
   if (locating) return;
+  if ($('method').value === 'direct') return locateDirect();
   const passes = st.passes.filter((p, i) => st.include[i]);
   const acs = allAircraft();
   if (!passes.length) { setStatus('locStatus', 'Tick at least one flyover to use.', true); return; }
@@ -816,6 +934,51 @@ async function locate() {
     locating = false; $('btnLocate').disabled = false;
   }
 }
+async function locateDirect() {
+  const acs = allAircraft(), bands = directBands();
+  if (!st.L) { setStatus('locStatus', 'Load a recording first.', true); return; }
+  if (!bands.length) { setStatus('locStatus', 'Tick a flyover or mark at least one tone band (Mark a flyover by hand, then drag around the tone).', true); return; }
+  if (!acs.length) { setStatus('locStatus', 'Add flight data that covers the recording.', true); return; }
+  const lat = num('lat', NaN), lon = num('lon', NaN);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { setStatus('locStatus', 'Enter a centre latitude and longitude.', true); return; }
+  const radius = Math.min(30000, Math.max(500, num('radius', 4) * 1000));
+  let step = Math.max(50, num('step', 200));
+  const nSide = 2 * Math.round(radius / step) + 1;
+  if (nSide * nSide > 6000) { step = Math.ceil(radius / 38 / 25) * 25; $('step').value = step; }
+  const timeKnown = $('timeKnown').checked, recStart = readRecStart();
+  if (timeKnown && !Number.isFinite(recStart)) { setStatus('locStatus', 'Enter the recording date and time, or untick "I know when the recording started".', true); return; }
+  locating = true; $('btnLocate').disabled = true; setStatus('locStatus', '');
+  try {
+    const c = E.soundSpeed(num('temp', 15));
+    const ws = num('wind', 0), wd = num('windDir', 270) * Math.PI / 180;
+    const wind = [-ws * Math.sin(wd), -ws * Math.cos(wd)];
+    const elev = num('elev', 0), micH = num('micH', 1.5);
+    const frame = new E.LocalFrame(lat, lon, elev);
+    const grid = E.makeGrid(radius, step).map(([e, n]) => [e, n, micH]);
+    const tracks = acs.flatMap((a) => E.prepareTrack(a, frame, { cropRadius: radius + 25000 }));
+    if (!tracks.length) throw new Error('None of the flight tracks pass within 25 km of the search area. Check the centre or the files.');
+    const job = { tracks, L: st.L, c, wind, mode: timeKnown ? 'known' : 'unknown', recStart, tol: Math.max(1, num('recTol', 2)), bands, diff: true };
+    setProg($('locProg'), 0, 'Matching flight tracks to the spectrogram…');
+    const coarse = await guidedParallel(grid, job, null, `Matching ${tracks.length} tracks at ${grid.length} grid points…`, 0, 0.75);
+    if (!Array.from(coarse.score).some(Number.isFinite)) throw new Error('No aircraft in the flight data was audible from the search area at that time. Check the time, the area and the files.');
+    const fine = E.refineByScore(grid, coarse.score, coarse.off, step);
+    const fineRes = await guidedParallel(fine.pts, job, fine.hints, `Refining ${fine.pts.length} points near the best areas…`, 0.75, 1);
+    const an = E.analyzeScores(fine.pts, fineRes.score, step / 4);
+    const top = an.scoreBest, tau = an.tau;
+    const pseudo = (v) => (Number.isFinite(v) ? 1 + Math.max(0, top - v) / tau : Infinity); // for the shared map drawing
+    coarse.rms = Float64Array.from(coarse.score, pseudo); fineRes.rms = Float64Array.from(fineRes.score, pseudo); an.rmsBest = 1;
+    coarse.evTrack = coarse.trk; fineRes.evTrack = fineRes.trk;
+    st.results = { direct: true, frame, grid, coarse, fine, fineRes, an, tracks, events: [{}], passes: [{}], passIdx: [0], c, wind, radius, step, timeKnown, recStart, bands, truncated: fine.truncated };
+    $('locProg').hidden = true;
+    selectPoint(an.best >= 0 ? { kind: 'fine', i: an.best } : null);
+    renderResults();
+  } catch (err) {
+    $('locProg').hidden = true;
+    setStatus('locStatus', err.message, true);
+  } finally {
+    locating = false; $('btnLocate').disabled = false;
+  }
+}
 $('btnLocate').addEventListener('click', locate);
 
 // ------------------------------------------------------------------ results
@@ -825,13 +988,26 @@ function pointInfo(sel) {
   const src = sel.kind === 'fine' ? { pts: R.fine.pts, res: R.fineRes } : { pts: R.grid, res: R.coarse };
   const X = src.pts[sel.i], nE = R.events.length;
   const [la, lo] = R.frame.toGeo(X[0], X[1], 0);
+  if (R.direct) return { X, lat: la, lon: lo, rms: src.res.rms[sel.i], score: src.res.score[sel.i], off: src.res.off[sel.i], f0s: [src.res.f0a[sel.i], src.res.f0b[sel.i]].filter(Number.isFinite), ev: [{ a: src.res.trk[sel.i], rms: NaN }] };
   return { X, lat: la, lon: lo, rms: src.res.rms[sel.i], off: src.res.off[sel.i], ev: R.events.map((_, e) => ({ a: src.res.evTrack[sel.i * nE + e], rms: src.res.evRms[sel.i * nE + e] })) };
 }
 
 function selectPoint(sel) {
   st.selected = sel;
   const R = st.results, info = pointInfo(sel);
-  if (info && Number.isFinite(info.rms)) {
+  if (info && Number.isFinite(info.rms) && R.direct) {
+    const tr = R.tracks[info.ev[0].a], curves = [];
+    const tab = tr ? E.receiveTable(tr, info.X, R.c, R.wind, 0.25) : null;
+    if (tab) for (const f0 of info.f0s) {
+      const tg = [], f = [];
+      for (let t = 0; t <= st.meta.duration; t += 0.5) {
+        const u = (info.off + t - tab.T0) / tab.dtU, i = Math.floor(u);
+        tg.push(t); f.push(i < 0 || i >= tab.M - 1 ? NaN : f0 * (tab.G[i] + (tab.G[i + 1] - tab.G[i]) * (u - i)));
+      }
+      curves.push({ t: tg, f });
+    }
+    sel.curves = curves;
+  } else if (info && Number.isFinite(info.rms)) {
     const curves = [];
     R.passes.forEach((p, e) => {
       const tr = R.tracks[info.ev[e].a];
@@ -850,6 +1026,7 @@ function selectPoint(sel) {
 function verdict(an) {
   if (!an || an.best < 0) return { cls: 'bad', text: 'No fit' };
   const cl = an.clusters;
+  if (st.results && st.results.direct) return cl.length > 1 ? { cls: 'warn', text: `${cl.length} areas match` } : { cls: 'info', text: 'Best guess (uncalibrated)' };
   if (cl.length > 1) return { cls: 'warn', text: `${cl.length} separate areas fit` };
   if (cl[0].major > 4 * cl[0].minor && cl[0].major > 800) return { cls: 'warn', text: 'Along a line, not a point' };
   return { cls: 'good', text: `Pinned to about ${fmtDist(Math.max(cl[0].major, 25))}` };
@@ -857,6 +1034,8 @@ function verdict(an) {
 
 function renderResults() {
   const R = st.results, v = verdict(R.an);
+  $('lgHeat').innerHTML = `<i class="grad"></i>${R.direct ? 'match: strong → weak' : 'misfit: good → poor'}`;
+  $('lgRegion').innerHTML = `<i style="background: var(--region)"></i>${R.direct ? 'near-best region (relative, not calibrated)' : '95% confidence region'}`;
   $('verdict').innerHTML = `<span class="pill ${v.cls}">${v.text}</span>`;
   drawMap(); renderAnswer(); renderAreas();
 }
@@ -868,7 +1047,13 @@ function renderAnswer() {
   if (!best) { box.innerHTML = '<p class="muted">No point fits.</p>'; return; }
   const cl = an.clusters, v = verdict(an);
   let why = '';
-  if (v.cls === 'good') why = `One compact area fits every ticked flyover. The 95% region is about ${fmtDist(cl[0].major)} by ${fmtDist(cl[0].minor)}.`;
+  if (R.direct) {
+    const a = R.tracks[best.ev[0].a];
+    // direct matching has no calibrated error: say so plainly
+    why = cl.length > 1
+      ? `${cl.length} separate areas match about equally well. Aircraft on the same route at different times can explain the same sound from different places, so a tighter start time helps most.`
+      : `The strongest match is ${a ? escapeHtml(a.label || a.id) : 'one aircraft'}, heard in ${R.bands.length} tone band${R.bands.length === 1 ? '' : 's'}. The shaded area holds the points whose match is within ${Math.round(100 * 0.15)}% of the best, relative to the area's typical match. It is a guide, not a confidence region.`;
+  } else if (v.cls === 'good') why = `One compact area fits every ticked flyover. The 95% region is about ${fmtDist(cl[0].major)} by ${fmtDist(cl[0].minor)}.`;
   else if (cl.length > 1) why = R.passes.length === 1
     ? `A single straight pass is symmetric. Points on both sides of the flight path${R.timeKnown ? '' : ', and anywhere along it,'} hear the same curve. ${R.timeKnown ? 'Add' : 'Add the recording time or'} a second flyover to narrow it down.`
     : 'More than one area explains the flyovers. Compare their misfits below. Adding the recording time or another flyover usually separates them.';
@@ -876,7 +1061,7 @@ function renderAnswer() {
   const truth = st.demo && st.demo.truth ? (() => { const tX = R.frame.toENU(st.demo.truth.lat, st.demo.truth.lon, R.frame.h0); return Math.hypot(tX[0] - best.X[0], tX[1] - best.X[1]); })() : null;
   const show = sel && Number.isFinite(sel.rms) ? sel : best;
   const isBest = show === best || (st.selected && st.selected.kind === 'fine' && st.selected.i === an.best);
-  const evRows = '<dd>' + R.passes.map((p, e) => {
+  const evRows = R.direct ? (() => { const a = R.tracks[show.ev[0].a]; return `<dd>${a ? escapeHtml(a.label && a.label !== a.id ? `${a.label} (${a.id})` : a.id) : '–'} · tones ${show.f0s.map((f) => Math.round(f)).join(' & ')} Hz</dd>`; })() : '<dd>' + R.passes.map((p, e) => {
     const a = R.tracks[show.ev[e].a], col = passColor(R.passIdx[e], true);
     return `<div><span style="color:${col}">■</span> Flyover ${R.passIdx[e] + 1}: ${a ? escapeHtml(a.label && a.label !== a.id ? `${a.label} (${a.id})` : a.id) : '–'} · ${Number.isFinite(show.ev[e].rms) ? show.ev[e].rms.toFixed(2) : '–'} Hz</div>`;
   }).join('') + '</dd>';
@@ -890,7 +1075,9 @@ function renderAnswer() {
     </div>
     <p class="explain">${why}</p>
     <dl class="kv">
-      <dt>Misfit</dt><dd class="num">${Number.isFinite(show.rms) ? show.rms.toFixed(3) : '–'} Hz RMS${isBest ? '' : ` (best ${best.rms.toFixed(3)} Hz)`}</dd>
+      ${R.direct
+    ? `<dt>Match</dt><dd class="num">${Number.isFinite(show.score) ? show.score.toFixed(3) : '–'}${isBest ? '' : ` (best ${best.score.toFixed(3)})`} · area median ${an.scoreMedian.toFixed(3)}</dd>`
+    : `<dt>Misfit</dt><dd class="num">${Number.isFinite(show.rms) ? show.rms.toFixed(3) : '–'} Hz RMS${isBest ? '' : ` (best ${best.rms.toFixed(3)} Hz)`}</dd>`}
       <dt>Started</dt><dd class="num">${fmtUTC(show.off)}${R.timeKnown ? ` (${(show.off - R.recStart >= 0 ? '+' : '') + (show.off - R.recStart).toFixed(2)} s vs given)` : ''}</dd>
       <dt>Aircraft</dt>${evRows}
       ${truth !== null ? `<dt>Demo truth</dt><dd class="num">${fmtDist(truth)} from the best match</dd>` : ''}
@@ -910,9 +1097,9 @@ function renderAreas() {
   if (!an.clusters.length) { $('areas').innerHTML = ''; return; }
   const rows = an.clusters.slice(0, 8).map((c, k) => {
     const X = R.fine.pts[c.best], [la, lo] = R.frame.toGeo(X[0], X[1], 0);
-    return `<tr data-i="${c.best}"><td>${k + 1}</td><td>${la.toFixed(5)}</td><td>${lo.toFixed(5)}</td><td>${c.rms.toFixed(3)}</td><td>${fmtDist(c.major)} × ${fmtDist(c.minor)}</td><td>${fmtUTC(R.fineRes.off[c.best])}</td></tr>`;
+    return `<tr data-i="${c.best}"><td>${k + 1}</td><td>${la.toFixed(5)}</td><td>${lo.toFixed(5)}</td><td>${R.direct ? c.score.toFixed(3) : c.rms.toFixed(3)}</td><td>${fmtDist(c.major)} × ${fmtDist(c.minor)}</td><td>${fmtUTC(R.fineRes.off[c.best])}</td></tr>`;
   }).join('');
-  $('areas').innerHTML = `<table><thead><tr><th>Area</th><th>Lat</th><th>Lon</th><th>Misfit Hz</th><th>95% extent</th><th>Recording start (UTC)</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('areas').innerHTML = `<table><thead><tr><th>Area</th><th>Lat</th><th>Lon</th><th>${R.direct ? 'Match' : 'Misfit Hz'}</th><th>${R.direct ? 'Extent' : '95% extent'}</th><th>Recording start (UTC)</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('areas').querySelectorAll('tbody tr').forEach((tr) => tr.addEventListener('click', () => selectPoint({ kind: 'fine', i: Number(tr.dataset.i) })));
 }
 
@@ -924,7 +1111,18 @@ async function setupDownload() {
   if (!downloads) return;
   b.hidden = false;
   b.onclick = async () => {
-    const R = st.results, lines = ['kind,lat,lon,misfit_hz,in_95pct_region,rec_start_utc,' + R.passes.map((_, e) => `flyover${R.passIdx[e] + 1}_aircraft`).join(',')];
+    const R = st.results;
+    if (R.direct) {
+      const out = ['kind,lat,lon,match,in_near_best_region,rec_start_utc,aircraft,tone1_hz,tone2_hz'];
+      const addD = (kind, pts, res, region) => pts.forEach((X, i) => {
+        const [la, lo] = R.frame.toGeo(X[0], X[1], 0), t = R.tracks[res.trk[i]];
+        out.push([kind, la.toFixed(6), lo.toFixed(6), Number.isFinite(res.score[i]) ? res.score[i].toFixed(4) : '', region ? region[i] : '', Number.isFinite(res.off[i]) ? new Date(res.off[i] * 1000).toISOString() : '', t ? t.id : '', Number.isFinite(res.f0a[i]) ? res.f0a[i].toFixed(1) : '', Number.isFinite(res.f0b[i]) ? res.f0b[i].toFixed(1) : ''].join(','));
+      });
+      addD('grid', R.grid, R.coarse, null); addD('refined', R.fine.pts, R.fineRes, R.an.inRegion);
+      try { await downloads.save({ filename: 'flyover-locator-direct-match.csv', data: out.join('\n') }); } catch (e) { setStatus('locStatus', 'The download was not saved.', true); }
+      return;
+    }
+    const lines = ['kind,lat,lon,misfit_hz,in_95pct_region,rec_start_utc,' + R.passes.map((_, e) => `flyover${R.passIdx[e] + 1}_aircraft`).join(',')];
     const add = (kind, pts, res, region) => pts.forEach((X, i) => {
       const [la, lo] = R.frame.toGeo(X[0], X[1], 0), nE = R.events.length;
       const acs = R.events.map((_, e) => { const t = R.tracks[res.evTrack[i * nE + e]]; return t ? t.id : ''; });
@@ -1112,6 +1310,7 @@ async function loadDemo() {
   $('lat').value = demo.center.lat.toFixed(4); $('lon').value = demo.center.lon.toFixed(4);
   $('radius').value = 4; $('step').value = 200; $('elev').value = demo.groundElev; $('micH').value = demo.micHeight; $('temp').value = demo.tempC;
   $('wind').value = 0; $('timeKnown').checked = false; $('timeFields').hidden = true; setRecStart(demo.recStart); $('metaHint').hidden = true;
+  $('method').value = 'trace'; renderMethodHint();
   st.flights = [{ name: 'demo-adsb.csv', text: demo.csv, demo: true }];
   parseAllFlights();
   st.results = null; drawMap(); renderAnswer(); $('verdict').innerHTML = '';
@@ -1140,6 +1339,7 @@ $('fileAudio').addEventListener('change', async (e) => {
       hint.hidden = false;
       hint.textContent = `No creation time found in the file. Its last-modified date is ${fmtUTC(file.lastModified / 1000)}, which is often when it was saved or copied, not when it was recorded.`;
     }
+    $('method').value = 'direct'; renderMethodHint();
     await analyse(rec.samples, rec.sr, file.name);
   } catch (err) {
     $('audioProg').hidden = true;
@@ -1153,7 +1353,7 @@ const rerender = () => { drawSpec(); drawMap(); if (st.results) renderAnswer(); 
 try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rerender); } catch (e) { /* old browsers */ }
 new MutationObserver(rerender).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-drawSpec(); drawMap(); renderFindData();
+drawSpec(); drawMap(); renderFindData(); renderMethodHint();
 loadDemo().catch((e) => { $('scopeMsg').textContent = e.message; setStatus('locStatus', e.message, true); });
 })();
 </script>

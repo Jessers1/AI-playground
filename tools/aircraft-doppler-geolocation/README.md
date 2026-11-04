@@ -44,8 +44,50 @@ node test_engine.js 7     # headless end-to-end test of the engine (two flyovers
 node build.js             # inlines engine.js into app.html -> dist/flyover-locator.html
 ```
 
-The page cannot download flight data itself, because the artifact sandbox blocks network requests. It links
-to replay maps for the area and time instead. It is still only tested on synthetic recordings.
+The page cannot download flight data itself, because the artifact sandbox blocks network requests.
+`fetch_adsb.py` does that part (below).
+
+### Getting flight data: `fetch_adsb.py`
+
+```bash
+# while you record: log live traffic around you (adsb.fi open data, or --source adsblol)
+python fetch_adsb.py live --lat 51.52 --lon 0.12 --minutes 20 --out flights.csv
+# a past recording made on the 1st of a month: ADS-B Exchange's free sample archive
+python fetch_adsb.py history --lat 43.6447 --lon 1.3115 --time 2023-05-01T04:34:00Z --out flights.csv
+```
+
+Both sources are free and need no account. The history mode scans the world snapshots for aircraft that came
+near the point, then downloads each one's full trace (about 15 s for a 20-minute window). Other dates need an
+account-based source, such as OpenSky via pyopensky or traffic. The CSV loads straight into the page.
+
+### Direct matching (for real recordings)
+
+Real jet tones break up, cross each other and come and go, so the ridge tracker often finds nothing clean.
+Direct matching skips tracing. For each grid point, aircraft and start time, it predicts the Doppler ratio
+from the ADS-B track, then slides that curve up and down a log-frequency spectrogram (40 Hz–2.5 kHz). It
+does this inside the tone bands you mark, plus any traced flyovers. Each tone's support is the forward curve
+minus the same curve run backwards, so steady and broadband sound cancel. Its "near-best region" is
+relative, not a calibrated confidence region.
+
+### Real-world tests
+
+Recordings are xeno-canto field recordings with published coordinates and times. Flight data comes from
+ADS-B Exchange's archive, via `fetch_adsb.py`. `web/test_real.js` reruns these checks.
+
+| Recording | What happened |
+|---|---|
+| XC797641, Cornebarrieu (Toulouse), 2023-05-01 06:34 local, a departure off runway 32 | The tracer found no clean ridge. Direct matching used two marked bands (50–200 Hz, 700–1600 Hz) and the logged minute ±1. It placed the recordist **0.77–0.9 km** away and named the right aircraft (DLH18U, which passed 2.4 km away) and the start time (≈04:33Z). In the browser run the true spot's grid cell ranked 4th–6th of 625. With the time unknown, a later Air France departure on the same route matched almost as well from 2–4 km away. |
+| XC977084, Barking Riverside (London), 2025-03-01 "12:00" | The tracer found a clean 133/266 Hz falling tone. Neither method placed it: the best match was about 6 km off, and no logged aircraft explains the tone from the true spot (1.9 Hz misfit). It may not be an aircraft (the site is next to a railway and the Thames), the clip is edited, or the time is off. |
+| XC976907, Cork, 2025-03-01 | The hum rises slowly. The time-reversed check rejects it, correctly, since a flyover only falls. |
+| Live open microphone, Kilburn (London), 25 min, with live ADS-B logged | Street traffic produces rising and falling tones too. Nothing cleared the noise bar, and the microphone's listed coordinates are only a city centroid. |
+
+Takeaways:
+
+- The physics holds on real audio. At the true Toulouse location, a low tone (~72 Hz) and a fan tone
+  (~1.2 kHz) independently give the same start time for the same aircraft.
+- What limits real-world use is time precision and busy routes. Aircraft on the same route minutes apart
+  explain the same sound from different places, so a timestamp to the second helps most.
+- Two real recordings are not a validation study.
 
 ## What's here (Python CLI)
 

@@ -934,6 +934,10 @@
     else if (baroFt >= 0) [iAlt, unit, kind] = [baroFt, 'ft', 'barometric'];
     else throw new Error(`No altitude column. Found: ${header.join(', ')}`);
     if (altUnits === 'ft' || altUnits === 'm') unit = altUnits;
+    // fall back to barometric altitude row by row when the GNSS column is empty
+    const iAltFb = kind === 'geometric' ? (baroFt >= 0 ? baroFt : baroM) : -1;
+    const fbUnit = iAltFb >= 0 && iAltFb === baroM ? 'm' : 'ft';
+    let nFallback = 0;
     const iId = pick(header, COLS.id), iCs = pick(header, COLS.callsign);
     const iGsMs = pick(header, COLS.gsMs), iGsKt = pick(header, COLS.gsKt), iTrk = pick(header, COLS.trk);
     const iVrMs = pick(header, COLS.vrMs), iVrF = pick(header, COLS.vrFpm), iGnd = pick(header, COLS.onground);
@@ -945,7 +949,15 @@
       let lat, lon;
       if (iLat >= 0 && iLon >= 0) { lat = parseFloat(row[iLat]); lon = parseFloat(row[iLon]); }
       else { const p = (row[iPos] || '').split(','); lat = parseFloat(p[0]); lon = parseFloat(p[1]); }
-      const altRaw = parseFloat(row[iAlt]);
+      let altRaw = parseFloat(row[iAlt]);
+      if (!Number.isFinite(altRaw) && iAltFb >= 0) {
+        const fb = parseFloat(row[iAltFb]);
+        if (Number.isFinite(fb)) {
+          const metres = fbUnit === 'ft' ? fb * FT : fb;
+          altRaw = unit === 'ft' ? metres / FT : metres; // expressed in the main column's unit
+          nFallback++;
+        }
+      }
       if (!Number.isFinite(altRaw)) continue;
       const id = ((iId >= 0 ? row[iId] : '') || (iCs >= 0 ? row[iCs] : '') || 'aircraft').trim().toLowerCase();
       const cs = (iCs >= 0 ? row[iCs] : '').trim();
@@ -962,6 +974,7 @@
     const scale = unit === 'ft' ? FT : 1;
     for (const a of map.values()) a.alt = a.alt.map((v) => v * scale);
     notes.push(`Read ${header[iAlt]} as ${kind} altitude in ${unit === 'ft' ? 'feet' : 'metres'}.`);
+    if (nFallback) notes.push(`${nFallback} rows had no ${header[iAlt]} and used ${header[iAltFb]} instead.`);
     return finalizeAircraft(map, notes);
   }
 
@@ -1170,6 +1183,8 @@
     return n ? { mse: sse / n, cov: n / tot } : { mse: Infinity, cov: 0 };
   }
 
+  E.receiveTable = receiveTable;
+
   E.prepareEvents = function (events) {
     return events.map((ev) => ({
       v: ev.v, d: ev.d, vRel: ev.vRel, dRel: ev.dRel, neff: ev.neff,
@@ -1296,6 +1311,156 @@
     const q = [-0.375, -0.125, 0.125, 0.375], out = [], hints = [];
     for (const i of idx) for (const a of q) for (const b of q) { out.push([pts[i][0] + a * step, pts[i][1] + b * step, pts[i][2]]); hints.push(off[i]); }
     return { pts: out, hints, truncated: idx.length === maxCells };
+  };
+
+  // ------------------------------------------------------------------ direct matching against flight data
+  // Real recordings rarely give one clean ridge: jet tones come and go and cross each other. This
+  // mode skips ridge tracing. For a candidate observer, an aircraft and a start time, it predicts the
+  // Doppler ratio g(t) from the ADS-B track and slides f0*g(t) up and down a log-frequency
+  // spectrogram (a vertical shift on a log axis), so every base tone in a band is tested at once.
+  E.guidedSpectrogram = function (x, sr, o = {}) {
+    const hop = o.hop || 0.5, fLo = o.fLo || 40, fHi = Math.min(o.fHi || 2500, 0.45 * sr), D = o.dlog || 0.006, split = o.split || 300;
+    const parts = [
+      { win: 1.0, lo: fLo, hi: Math.min(split, fHi) },
+      { win: 0.35, lo: split, hi: fHi },
+    ].filter((p) => p.hi > p.lo);
+    const l0 = Math.log(fLo), nL = Math.ceil((Math.log(fHi) - l0) / D);
+    let nT = Infinity;
+    const specs = parts.map((p) => {
+      const spec = E.spectrogram(x, sr, { win: p.win, hop, fmin: p.lo * 0.9, fmax: Math.min(p.hi * 1.1, 0.47 * sr), zpad: 2 });
+      nT = Math.min(nT, spec.nT);
+      return { p, spec, z: E.whiten(spec) };
+    });
+    // align frames on their centres: the shorter window starts later in the file
+    const times = new Float64Array(nT);
+    const ref = specs[0].spec;
+    for (let t = 0; t < nT; t++) times[t] = ref.times[t];
+    const zl = new Float32Array(nT * nL).fill(0);
+    for (const { p, spec, z } of specs) {
+      const shift = Math.round((spec.times[0] - ref.times[0]) / spec.hop);
+      const k0 = Math.max(0, Math.floor((Math.log(p.lo) - l0) / D)), k1 = Math.min(nL, Math.ceil((Math.log(p.hi) - l0) / D));
+      for (let t = 0; t < nT; t++) {
+        const ts = t - shift;
+        if (ts < 0 || ts >= spec.nT) continue;
+        for (let k = k0; k < k1; k++) {
+          const fa = Math.exp(l0 + k * D), fb = Math.exp(l0 + (k + 1) * D);
+          const ba = Math.max(0, Math.floor((fa - spec.freqs[0]) / spec.df)), bb = Math.min(spec.nF - 1, Math.max(ba, Math.floor((fb - spec.freqs[0]) / spec.df)));
+          let m = -3;
+          for (let b = ba; b <= bb; b++) { const v = z[ts * spec.nF + b]; if (v > m) m = v; }
+          zl[t * nL + k] = m > 8 ? 8 : m;
+        }
+      }
+    }
+    return { nT, nL, l0, D, times, zl, hop, fLo, fHi, duration: x.length / sr };
+  };
+
+  // Score one predicted ratio table at many start times; returns {score, off, f0s} for the best.
+  // Bands are frequency ranges where tones are visible (marked by the user or from weak detections).
+  // For each band the best base tone is taken; the score is the sum over bands. With `diff`, a tone's
+  // support is the forward curve minus the same curve run backwards over the same frames, so steady
+  // and broadband sound cancel.
+  function guidedBest(L, tab, offs, bands, diff) {
+    const { nT, nL, l0, D, times, zl } = L;
+    const accF = new Float64Array(nL), accR = new Float64Array(nL), cnt = new Int32Array(nL), sh = new Int32Array(nT);
+    const NONE = 1 << 30;
+    const kb = bands.map(([lo, hi]) => [Math.max(0, Math.ceil((Math.log(lo) - l0) / D)), Math.min(nL - 1, Math.floor((Math.log(hi) - l0) / D))]);
+    let best = { score: -Infinity };
+    for (const off of offs) {
+      let used = 0, first = -1, last = -1;
+      for (let t = 0; t < nT; t++) {
+        const u = (off + times[t] - tab.T0) / tab.dtU, i = Math.floor(u);
+        if (i < 0 || i >= tab.M - 1) { sh[t] = NONE; continue; }
+        const g = tab.G[i] + (tab.G[i + 1] - tab.G[i]) * (u - i);
+        sh[t] = Math.round(Math.log(g) / D); used++;
+        if (first < 0) first = t; last = t;
+      }
+      if (used < 0.8 * nT) continue;
+      accF.fill(0); accR.fill(0); cnt.fill(0);
+      for (let t = first; t <= last; t++) {
+        const sf = sh[t], sr = diff ? sh[first + last - t] : 0;
+        if (sf === NONE || sr === NONE) continue;
+        const row = t * nL, kLo = Math.max(0, -sf, -sr), kHi = Math.min(nL, nL - sf, nL - sr);
+        for (let k = kLo; k < kHi; k++) { accF[k] += zl[row + k + sf]; if (diff) accR[k] += zl[row + k + sr]; cnt[k]++; }
+      }
+      let score = 0, ok = true;
+      const f0s = [];
+      for (const [k0, k1] of kb) {
+        let bv = -Infinity, bk = -1;
+        for (let k = k0; k <= k1; k++) if (cnt[k] >= 0.8 * used) { const v = (accF[k] - accR[k]) / cnt[k]; if (v > bv) { bv = v; bk = k; } }
+        if (bk < 0) { ok = false; break; }
+        score += bv; f0s.push(Math.exp(l0 + bk * D));
+      }
+      if (ok && score > best.score) best = { score, off, f0s };
+    }
+    return best;
+  }
+
+  // job: {cands, tracks, L, c, wind, mode, recStart, tol, hints?, hintTol?, maxRange}
+  E.guidedScore = function (job, progress) {
+    const { cands, tracks, L, c, wind } = job;
+    const nc = cands.length, score = new Float64Array(nc).fill(-Infinity), off = new Float64Array(nc).fill(NaN);
+    const trk = new Int32Array(nc).fill(-1), f0a = new Float64Array(nc).fill(NaN), f0b = new Float64Array(nc).fill(NaN);
+    const maxRange = job.maxRange || 12000, dur = L.duration;
+    for (let ci = 0; ci < nc; ci++) {
+      const X = cands[ci];
+      let offs;
+      const known = job.mode === 'known' || !!job.hints;
+      for (let a = 0; a < tracks.length; a++) {
+        const tr = tracks[a];
+        let dmin = Infinity;
+        for (let j = 0; j < tr.N; j += 8) dmin = Math.min(dmin, Math.hypot(X[0] - tr.px[j], X[1] - tr.py[j], X[2] - tr.pz[j]));
+        if (dmin > maxRange) continue;
+        const tab = receiveTable(tr, X, c, wind, 0.25);
+        if (!tab) continue;
+        if (known) {
+          const rs = job.hints ? job.hints[ci] : job.recStart, tl = job.hints ? job.hintTol || 4 : job.tol;
+          const step = job.hints ? 0.5 : 1;
+          offs = [];
+          for (let o = -tl; o <= tl + 1e-9; o += step) offs.push(rs + o);
+        } else { // start times for which this aircraft is heard during the recording
+          offs = [];
+          for (let o = Math.floor(tab.T0 - 0.2 * dur); o <= tab.T0 + tab.M * tab.dtU - 0.8 * dur; o += 2) offs.push(o);
+        }
+        const b = guidedBest(L, tab, offs, job.bands || [[L.fLo, L.fHi]], !!job.diff);
+        if (b.score > score[ci]) { score[ci] = b.score; off[ci] = b.off; trk[ci] = a; f0a[ci] = b.f0s[0]; f0b[ci] = b.f0s.length > 1 ? b.f0s[1] : NaN; }
+      }
+      if (progress && (ci & 7) === 0) progress(ci / nc);
+    }
+    return { score, off, trk, f0a, f0b };
+  };
+
+  // Sub-grid refinement for a "higher is better" score: the best cells (within frac of the spread
+  // between the best and the median), each split into a 4x4 sub-grid that inherits its start time.
+  E.refineByScore = function (pts, score, off, step, maxCells = 120, frac = 0.35) {
+    const fin = Array.from(score).filter(Number.isFinite);
+    if (!fin.length) return { pts: [], hints: [] };
+    const top = Math.max(...fin), med = median(fin), lim = top - frac * (top - med);
+    const idx = [];
+    for (let i = 0; i < pts.length; i++) if (score[i] >= lim) idx.push(i);
+    idx.sort((a, b) => score[b] - score[a]);
+    idx.length = Math.min(idx.length, maxCells);
+    const q = [-0.375, -0.125, 0.125, 0.375], out = [], hints = [];
+    for (const i of idx) for (const a of q) for (const b of q) { out.push([pts[i][0] + a * step, pts[i][1] + b * step, pts[i][2]]); hints.push(off[i]); }
+    return { pts: out, hints, truncated: idx.length === maxCells };
+  };
+
+  // Region and clusters for a "higher is better" score field. Without a noise model for this score,
+  // the region is every point within a fixed fraction (frac) of the gap between the best and the
+  // area's median: a relative "near-best" region, not a calibrated confidence region.
+  E.analyzeScores = function (pts, score, step, frac = 0.15) {
+    const fin = Array.from(score).filter(Number.isFinite);
+    if (!fin.length) return { best: -1, inRegion: new Uint8Array(pts.length), clusters: [], gap: new Float64Array(pts.length).fill(Infinity) };
+    const med = median(fin), mad = 1.4826 * median(fin.map((v) => Math.abs(v - med))) + 1e-9;
+    let best = 0;
+    for (let i = 0; i < pts.length; i++) if (score[i] > score[best] || !Number.isFinite(score[best])) best = i;
+    const gap = Float64Array.from(score, (v) => (Number.isFinite(v) ? score[best] - v : Infinity));
+    const tau = Math.max(frac * (score[best] - med), 1e-6);
+    // reuse the misfit analysis: treat (gap / tau) as a chi-square-like distance with threshold 1
+    const pseudo = Float64Array.from(gap, (g) => (Number.isFinite(g) ? Math.sqrt(1 + g / tau) : Infinity));
+    const an = E.analyze(pts, pseudo, 5.99, step); // sqrt(1 + gap/tau): region where gap <= tau
+    an.scoreBest = score[best]; an.scoreMedian = med; an.scoreMad = mad; an.sigmaAbove = (score[best] - med) / mad; an.tau = tau;
+    for (const cl of an.clusters) cl.score = score[cl.best];
+    return an;
   };
 
   // ------------------------------------------------------------------ confidence region / clusters
