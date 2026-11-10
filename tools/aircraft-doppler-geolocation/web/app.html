@@ -88,6 +88,9 @@ button.link { border: 0; padding: 0; color: var(--blue); background: none; text-
 .btnrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .fileinfo { font: 13px/1.4 var(--f-mono); color: var(--muted); word-break: break-word; }
 .notes { display: grid; gap: 4px; font-size: 13px; color: var(--muted); margin: 0; padding-left: 18px; }
+.autofetch { display: grid; gap: 8px; border: 1px dashed var(--rule); border-radius: 4px; padding: 10px; }
+.autofetch .prev { display: grid; gap: 4px; font: 12px/1.4 var(--f-mono); color: var(--muted); }
+.autofetch .prev button { padding: 3px 7px; font-size: 12px; }
 .aclist { display: grid; gap: 2px; max-height: 170px; overflow: auto; border-top: 1px solid var(--rule); padding-top: 6px; }
 .ac { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; font: 13px/1.5 var(--f-mono); }
 .ac .k { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -186,6 +189,20 @@ tbody tr { cursor: pointer; }
             <label class="filebtn">Add flight files<input id="fileFlights" type="file" multiple accept=".csv,.json,.kml,.gz,.txt,.tsv"></label>
             <button type="button" id="btnClearFlights">Clear</button>
           </div>
+          <div class="autofetch" id="autoFetch" hidden>
+            <div class="lbl">Fetch it for me</div>
+            <p class="hint" style="margin:0">Starts a Claude helper in the cloud that downloads ADS-B tracks around the search centre and saves them here. Takes about a minute. History only covers the 1st of each month; live mode logs traffic from now, so start it before you record.</p>
+            <div class="row3">
+              <div class="field"><label for="afMode">Source</label>
+                <select id="afMode"><option value="history">At the recording time</option><option value="live">Live, from now</option></select></div>
+              <div class="field"><label for="afMinutes" id="afMinutesLbl">± minutes</label><input id="afMinutes" type="number" min="1" max="30" step="1" value="10"></div>
+              <div class="field"><label for="afRadius">Radius (km)</label><input id="afRadius" type="number" min="3" max="40" step="1" value="15"></div>
+            </div>
+            <div class="btnrow"><button type="button" id="btnFetch">Fetch flight data</button></div>
+            <div class="status" id="afStatus"></div>
+            <div class="prev" id="afPrev"></div>
+          </div>
+          <p class="hint" id="afNote" hidden></p>
           <div class="row2">
             <div class="field"><label for="altUnits">Altitude units</label>
               <select id="altUnits"><option value="auto">Detect</option><option value="ft">Feet</option><option value="m">Metres</option></select></div>
@@ -819,6 +836,146 @@ $('btnCenter').addEventListener('click', () => {
   renderFindData();
 });
 
+// ------------------------------------------------------------------ automatic flight data (cloud helper)
+// The page itself cannot reach the internet (sandbox, and the ADS-B servers send no CORS headers).
+// It asks the "Claude Code Remote" connector to start a cloud Claude session in an environment that
+// can, which runs fetch_adsb.py from the repository and writes the CSV into this page's database.
+const ART_URL = 'https://claude.ai/artifact/5SiKXyWqi5g1yt7qgsnJcQ';
+const HELPER = { env: 'env_01EGNneT5iwrYbR9qC6EpmuW', repo: 'https://github.com/Jessers1/AI-playground', branch: 'claude/transcribe-extract-report-cuqcdo', model: 'claude-sonnet-5-5' };
+const af = { db: null, mcp: null, watch: null, timer: null };
+
+async function initAutoFetch() {
+  const note = (t) => { $('afNote').hidden = false; $('afNote').textContent = t; };
+  if (!window.claude || !window.claude.use) { note('Automatic fetching works on the published page in Claude. Here, use fetch_adsb.py and add the CSV.'); return; }
+  const [db, mcp, user] = await Promise.all(['db', 'mcp', 'user'].map((n) => window.claude.use(n).catch(() => null)));
+  if (!db || !mcp) { note('Automatic fetching is not available in this view. Use fetch_adsb.py from the repository and add the CSV.'); return; }
+  let editor = null;
+  try { editor = user ? await user.canEdit() : null; } catch (e) { editor = null; }
+  if (editor === false) { note('Only the page owner and editors can fetch flight data automatically. Add a CSV instead.'); return; }
+  af.db = db; af.mcp = mcp;
+  $('autoFetch').hidden = false;
+  listPreviousFetches();
+}
+
+function afStatus(text, err) { const el = $('afStatus'); el.textContent = text; el.classList.toggle('err', !!err); }
+
+function helperPrompt(id, args, liveMinutes) {
+  const step1 = liveMinutes
+    ? `It logs live traffic for ${liveMinutes} minutes: run it in the background and wait for it to finish (do not stop it early).`
+    : 'It takes under a minute.';
+  return [
+    `You are a background helper for the Flyover Locator page (${ART_URL}). Your only job is to fetch ADS-B flight tracks and store them in that artifact's database. Do the steps below and nothing else: do not edit or commit files, push, open pull requests, or start other sessions.`,
+    '',
+    `1. From the repository root run: mkdir -p /tmp/flyover && python3 tools/aircraft-doppler-geolocation/fetch_adsb.py ${args} --out /tmp/flyover/flights.csv`,
+    `   ${step1}`,
+    `2. Run: python3 tools/aircraft-doppler-geolocation/fetch_adsb.py pack /tmp/flyover/flights.csv /tmp/flyover/out --request ${id}`,
+    `3. Load the ArtifactData tool (ToolSearch query "select:ArtifactData"). /tmp/flyover/out/batches.json holds a JSON list of write lists. For each list, in order, call ArtifactData with action "batch", url "${ART_URL}", and writes set to that list exactly as written (each entry already has op, collection, doc_id and file_path).`,
+    `4. If step 1 or 2 fails, call ArtifactData with action "set", url "${ART_URL}", collection "fetches/${id}/result", doc_id "summary", data {"status": "error", "message": "<one short line saying what failed>"}.`,
+    '',
+    'Then stop, replying with one line that says what you stored.',
+  ].join('\n');
+}
+
+$('afMode').addEventListener('change', () => {
+  const live = $('afMode').value === 'live';
+  $('afMinutesLbl').textContent = live ? 'Minutes' : '± minutes';
+  $('afMinutes').value = live ? 15 : 10;
+});
+
+$('btnFetch').addEventListener('click', async () => {
+  if (!af.db || !af.mcp) return;
+  const mode = $('afMode').value, lat = num('lat', NaN), lon = num('lon', NaN);
+  const radius = Math.min(40, Math.max(3, Math.round(num('afRadius', 15)))), minutes = Math.min(30, Math.max(1, Math.round(num('afMinutes', 10))));
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) { afStatus('Enter the search centre first (Search, step 3).', true); return; }
+  let args, timeIso = null;
+  if (mode === 'history') {
+    const t = readRecStart();
+    if (!Number.isFinite(t)) { afStatus('Tick "I know when the recording started" and enter the date and time (step 3).', true); return; }
+    const d = new Date(t * 1000);
+    if (d.getUTCDate() !== 1) { afStatus('The free history archive only covers the 1st of each month (UTC). For other dates, load a CSV from OpenSky or similar.', true); return; }
+    timeIso = d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    args = `history --lat ${lat.toFixed(5)} --lon ${lon.toFixed(5)} --radius-km ${radius} --time ${timeIso} --before ${minutes} --after ${minutes + 5}`;
+  } else {
+    args = `live --lat ${lat.toFixed(5)} --lon ${lon.toFixed(5)} --radius-km ${radius} --minutes ${minutes}`;
+  }
+  const id = 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  $('btnFetch').disabled = true;
+  try {
+    afStatus('Saving the request…');
+    await af.db.doc(`fetches/${id}`).set({ status: 'requested', mode, lat, lon, radiusKm: radius, minutes, time: timeIso, created: new Date().toISOString() });
+    afStatus('Starting the cloud helper (Claude asks you to allow this the first time)…');
+    const res = await af.mcp.callTool('Claude Code Remote', 'create_session', {
+      prompt: helperPrompt(id, args, mode === 'live' ? minutes : 0), environment_id: HELPER.env, source_url: HELPER.repo,
+      source_revision: HELPER.branch, title: `Flyover Locator: ${mode} ADS-B ${id}`, permission_mode: 'auto', model: HELPER.model,
+    }, { cache: false });
+    const sid = (JSON.stringify(res.payload ?? res).match(/session_[A-Za-z0-9]+/) || [])[0] || null;
+    watchFetch(id, sid, mode === 'live' ? minutes : 0);
+  } catch (err) {
+    $('btnFetch').disabled = false;
+    const code = err && err.code;
+    const msg = code === 'server_not_connected' ? 'The Claude Code Remote connector is not available for your account here.'
+      : code === 'not_in_manifest' || code === 'approval_required' || code === 'consent_required' ? 'Starting the helper needs your approval. Press Fetch again and allow it.'
+      : code === 'tool_error' ? `The helper could not start: ${err.message}`
+      : `The helper could not start (${code || 'error'}). ${err && err.message ? err.message : ''}`;
+    afStatus(msg, true);
+  }
+});
+
+function watchFetch(id, sid, liveMinutes) {
+  if (af.watch) af.watch();
+  clearInterval(af.timer);
+  const t0 = Date.now(), limit = (liveMinutes + 8) * 60;
+  const link = sid ? ` Helper: https://claude.ai/code/${sid}` : '';
+  af.timer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    afStatus(s > limit ? `Still waiting after ${fmtClock(s)}. The helper may have stopped.${link}` : `Helper running, ${fmtClock(s)} so far${liveMinutes ? ` of about ${liveMinutes + 1} min` : ''}…${link}`, s > limit);
+  }, 1000);
+  af.watch = af.db.doc(`fetches/${id}/result/summary`).onSnapshot((snap) => {
+    if (!snap.exists) return;
+    const d = snap.data();
+    clearInterval(af.timer); af.watch(); af.watch = null; $('btnFetch').disabled = false;
+    if (d.status === 'done') loadFetched(id, d); else afStatus(`The helper reported a problem: ${d.message || 'unknown'}`, true);
+  }, (e) => { clearInterval(af.timer); $('btnFetch').disabled = false; afStatus(`Lost the connection to this page's database (${e.code}). Reload to see the result.`, true); });
+}
+
+async function loadFetched(id, summary) {
+  try {
+    const lines = [];
+    for (let k = 0; k < summary.parts; k++) {
+      const snap = await af.db.doc(`fetches/${id}/parts/${k}`).get();
+      if (!snap.exists) throw new Error(`part ${k} is missing`);
+      const rows = String(snap.data().csv || '').split('\n');
+      lines.push(...(k ? rows.slice(1) : rows));
+    }
+    if (st.demo) leaveDemoFlights();
+    st.flights = st.flights.filter((f) => f.fetchId !== id);
+    st.flights.push({ name: `adsb-${id}.csv`, text: lines.join('\n'), fetchId: id });
+    parseAllFlights();
+    afStatus(`Loaded ${summary.rows} positions for ${summary.aircraft} aircraft.`);
+    listPreviousFetches();
+  } catch (err) { afStatus(`Could not read the fetched data: ${err.message || err.code}`, true); }
+}
+
+async function listPreviousFetches() {
+  const box = $('afPrev');
+  try {
+    const snap = await af.db.collection('fetches').orderBy('created', 'desc').limit(5).get();
+    box.innerHTML = '';
+    for (const doc of snap.docs) {
+      const d = doc.data(), row = document.createElement('div');
+      const when = d.mode === 'live' ? `live ${d.minutes} min from ${String(d.created).slice(0, 16).replace('T', ' ')}Z` : `${String(d.time).slice(0, 16).replace('T', ' ')}Z ± ${d.minutes} min`;
+      row.innerHTML = `${escapeHtml(when)} · ${Number(d.lat).toFixed(3)}, ${Number(d.lon).toFixed(3)} <button type="button">Load</button>`;
+      row.querySelector('button').addEventListener('click', async () => {
+        const s = await af.db.doc(`fetches/${doc.id}/result/summary`).get();
+        if (!s.exists) { afStatus('That fetch has no result yet.', true); return; }
+        const sd = s.data();
+        if (sd.status === 'done') loadFetched(doc.id, sd); else afStatus(`That fetch failed: ${sd.message || 'unknown'}`, true);
+      });
+      box.appendChild(row);
+    }
+  } catch (e) { box.textContent = ''; }
+}
+
 // ------------------------------------------------------------------ settings
 function num(id, def) { const v = parseFloat($(id).value); return Number.isFinite(v) ? v : def; }
 function readRecStart() {
@@ -1354,6 +1511,7 @@ try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rere
 new MutationObserver(rerender).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 drawSpec(); drawMap(); renderFindData(); renderMethodHint();
+initAutoFetch();
 loadDemo().catch((e) => { $('scopeMsg').textContent = e.message; setStatus('locStatus', e.message, true); });
 })();
 </script>

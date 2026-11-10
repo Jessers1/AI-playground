@@ -12,6 +12,11 @@ Two sources, both free and keyless:
            python fetch_adsb.py history --lat 51.5192 --lon 0.1212 --time 2025-03-01T12:00:00Z \\
                --before 10 --after 15 --out flights.csv
 
+  pack     Split a CSV into Flyover Locator database documents (used by the page's fetch helper):
+           python fetch_adsb.py pack flights.csv OUTDIR --request REQUEST_ID
+           writes OUTDIR/part-K.json (each under 200 KB), OUTDIR/summary.json and OUTDIR/batches.json,
+           a list of ArtifactData "batch" write lists (each under 1 MiB) that store them.
+
 For other dates you need a data source with an account (for example OpenSky's historical
 database via pyopensky or the traffic library); export it to CSV and load it the same way.
 
@@ -168,6 +173,50 @@ def cmd_history(a):
     write_rows(a.out, rows)
 
 
+# --------------------------------------------------------------------------- pack (for the page's database)
+def cmd_pack(a):
+    import os
+    os.makedirs(a.outdir, exist_ok=True)
+    with open(a.csv) as fh:
+        lines = fh.read().splitlines()
+    if not lines:
+        sys.exit("empty CSV")
+    header, rows = lines[0], lines[1:]
+    chunks, cur, size = [], [], 0
+    for ln in rows:
+        if cur and size + len(ln) + 1 > a.max_chars:
+            chunks.append(cur); cur, size = [], 0
+        cur.append(ln); size += len(ln) + 1
+    if cur or not chunks:
+        chunks.append(cur)
+    base = f"fetches/{a.request}"
+    writes = []
+    for k, ch in enumerate(chunks):
+        path = os.path.abspath(os.path.join(a.outdir, f"part-{k}.json"))
+        with open(path, "w") as fh:
+            json.dump({"k": k, "csv": "\n".join([header] + ch)}, fh)
+        writes.append({"op": "set", "collection": f"{base}/parts", "doc_id": str(k), "file_path": path})
+    icao = {ln.split(",")[1] for ln in rows if ln.count(",") > 2}
+    summary = {"status": "done", "parts": len(chunks), "rows": len(rows), "aircraft": len(icao),
+               "finished": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    spath = os.path.abspath(os.path.join(a.outdir, "summary.json"))
+    with open(spath, "w") as fh:
+        json.dump(summary, fh)
+    # parts first; the summary (which the page waits for) goes in the last batch
+    writes.append({"op": "set", "collection": f"{base}/result", "doc_id": "summary", "file_path": spath})
+    batches, cur, size = [], [], 0
+    for w in writes:
+        wsize = os.path.getsize(w["file_path"]) + 200
+        if cur and (len(cur) >= 50 or size + wsize > 950_000):
+            batches.append(cur); cur, size = [], 0
+        cur.append(w); size += wsize
+    batches.append(cur)
+    with open(os.path.join(a.outdir, "batches.json"), "w") as fh:
+        json.dump(batches, fh, indent=1)
+    print(f"{len(rows)} rows, {len(icao)} aircraft -> {len(chunks)} part(s) in {len(batches)} batch(es); "
+          f"write lists in {os.path.join(a.outdir, 'batches.json')}")
+
+
 def _safe(fn, *args):
     try:
         return fn(*args)
@@ -178,6 +227,11 @@ def _safe(fn, *args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    pk = sub.add_parser("pack")
+    pk.add_argument("csv")
+    pk.add_argument("outdir")
+    pk.add_argument("--request", required=True, help="request id from the page (letters, digits, -, _)")
+    pk.add_argument("--max-chars", type=int, default=190_000)
     for name in ("live", "history"):
         p = sub.add_parser(name)
         p.add_argument("--lat", type=float, required=True)
@@ -195,6 +249,11 @@ def main(argv=None):
             p.add_argument("--scan-step", type=int, default=30, help="seconds between scanned snapshots (multiple of 5)")
             p.add_argument("--workers", type=int, default=6)
     a = ap.parse_args(argv)
+    if a.cmd == "pack":
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9_-]{4,64}", a.request):
+            sys.exit("bad --request id")
+        return cmd_pack(a)
     (cmd_live if a.cmd == "live" else cmd_history)(a)
 
 
