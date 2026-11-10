@@ -2486,7 +2486,7 @@ $('btnFetch').addEventListener('click', async () => {
       prompt: helperPrompt(id, args, mode === 'live' ? minutes : 0), environment_id: HELPER.env, source_url: HELPER.repo,
       source_revision: HELPER.branch, title: `Flyover Locator: ${mode} ADS-B ${id}`, permission_mode: 'auto', model: HELPER.model,
     }, { cache: false });
-    const sid = (JSON.stringify(res.payload ?? res).match(/session_[A-Za-z0-9]+/) || [])[0] || null;
+    const pl = res.payload ?? {}, sid = (pl.ccr && pl.ccr.id) || pl.id || (JSON.stringify(pl).match(/"(session_01[A-Za-z0-9]+)"/) || [])[1] || null;
     watchFetch(id, sid, mode === 'live' ? minutes : 0);
   } catch (err) {
     $('btnFetch').disabled = false;
